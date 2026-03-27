@@ -110,18 +110,20 @@ function initToggles(): void {
 // ─── Debug Panel ──────────────────────────────────────────────
 
 const debugEl = document.getElementById('debug');
+const origLog = console.log;
+const origErr = console.error;
+
 const debugLog = (msg: string) => {
   const ts = new Date().toLocaleTimeString();
   if (debugEl) {
     debugEl.innerHTML += `<div><span style="color:#444">${ts}</span> ${msg}</div>`;
     debugEl.scrollTop = debugEl.scrollHeight;
   }
-  console.log(`[Debug] ${msg}`);
+  // Use origLog directly to avoid infinite recursion
+  origLog(`[Debug] ${msg}`);
 };
 
 // Intercept console.log/error for BrowserAudio and LiveCaption messages
-const origLog = console.log;
-const origErr = console.error;
 console.log = (...args: any[]) => {
   origLog.apply(console, args);
   const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
