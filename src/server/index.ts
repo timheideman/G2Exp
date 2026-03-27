@@ -1,11 +1,9 @@
 /**
  * LiveCaption WebSocket Proxy Server
  *
- * Sits between the G2 glasses (via phone WebView) and Deepgram's streaming API.
- * - Waits for client config before opening Deepgram connection
- * - Receives raw PCM audio and forwards to Deepgram
- * - Sends back structured transcript messages
- * - Supports runtime language/config changes
+ * - Waits for BOTH config AND first audio before opening Deepgram
+ * - Sends keepalive to prevent Deepgram timeout during silence
+ * - Reconnects Deepgram if connection drops while client is active
  */
 
 import 'dotenv/config';
@@ -17,6 +15,7 @@ const PORT = parseInt(process.env.WS_PORT || '8080', 10);
 const DG_API_KEY = process.env.DEEPGRAM_API_KEY;
 const DG_MODEL = process.env.DG_MODEL || 'nova-3';
 const DG_REGION = process.env.DG_REGION || 'eu';
+const KEEPALIVE_INTERVAL_MS = 8000; // Deepgram timeout is ~10s
 
 if (!DG_API_KEY) {
   console.error('❌ DEEPGRAM_API_KEY not set in .env');
@@ -46,18 +45,22 @@ wss.on('connection', (clientWs: WebSocket) => {
   let config: SessionConfig | null = null;
   let dgConnection: ListenLiveClient | null = null;
   let isDeepgramOpen = false;
-  let audioQueue: ArrayBuffer[] = []; // Buffer audio until Deepgram is ready
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  let audioChunkCount = 0;
+  let closing = false;
 
   function openDeepgram(cfg: SessionConfig): void {
-    // Close existing connection if any
-    if (dgConnection && isDeepgramOpen) {
-      console.log('🔄 Closing old Deepgram connection...');
+    if (closing) return;
+
+    // Close existing
+    stopKeepalive();
+    if (dgConnection) {
       isDeepgramOpen = false;
-      dgConnection.requestClose();
+      try { dgConnection.requestClose(); } catch {}
       dgConnection = null;
     }
 
-    console.log(`🔗 Opening Deepgram (lang=${cfg.language}, model=${DG_MODEL})...`);
+    console.log(`🔗 Opening Deepgram (lang=${cfg.language})...`);
 
     dgConnection = deepgram.listen.live({
       model: DG_MODEL,
@@ -76,17 +79,8 @@ wss.on('connection', (clientWs: WebSocket) => {
     dgConnection.on(LiveTranscriptionEvents.Open, () => {
       console.log(`✅ Deepgram ready (lang=${cfg.language})`);
       isDeepgramOpen = true;
+      startKeepalive();
 
-      // Flush any queued audio
-      if (audioQueue.length > 0) {
-        console.log(`📤 Flushing ${audioQueue.length} queued audio chunks`);
-        for (const chunk of audioQueue) {
-          dgConnection!.send(chunk);
-        }
-        audioQueue = [];
-      }
-
-      // Notify client
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(JSON.stringify({
           type: 'server_ready',
@@ -100,16 +94,13 @@ wss.on('connection', (clientWs: WebSocket) => {
     });
 
     dgConnection.on(LiveTranscriptionEvents.Transcript, (data) => {
-      const alternatives = data.channel?.alternatives;
-      if (!alternatives || alternatives.length === 0) return;
-
-      const alt = alternatives[0];
-      const transcript = alt.transcript;
-      if (!transcript || transcript.trim() === '') return;
+      const alt = data.channel?.alternatives?.[0];
+      if (!alt?.transcript?.trim()) return;
 
       const isFinal = data.is_final;
       const words = alt.words || [];
 
+      // Determine primary speaker
       const speakerCounts = new Map<number, number>();
       for (const w of words) {
         if (w.speaker !== undefined) {
@@ -119,37 +110,29 @@ wss.on('connection', (clientWs: WebSocket) => {
       let speaker = 0;
       let maxCount = 0;
       for (const [s, c] of speakerCounts) {
-        if (c > maxCount) {
-          speaker = s;
-          maxCount = c;
-        }
+        if (c > maxCount) { speaker = s; maxCount = c; }
       }
 
-      const message = {
-        type: isFinal ? 'final' : 'interim',
-        speaker,
-        text: transcript,
-        timestamp: Date.now(),
-        isFinal,
-        words: words.map((w: any) => ({
-          word: w.punctuated_word || w.word,
-          speaker: w.speaker ?? 0,
-          start: w.start,
-          end: w.end,
-        })),
-      };
-
       if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(JSON.stringify(message));
+        clientWs.send(JSON.stringify({
+          type: isFinal ? 'final' : 'interim',
+          speaker,
+          text: alt.transcript,
+          timestamp: Date.now(),
+          isFinal,
+          words: words.map((w: any) => ({
+            word: w.punctuated_word || w.word,
+            speaker: w.speaker ?? 0,
+            start: w.start,
+            end: w.end,
+          })),
+        }));
       }
     });
 
     dgConnection.on(LiveTranscriptionEvents.UtteranceEnd, () => {
       if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(JSON.stringify({
-          type: 'utterance_end',
-          timestamp: Date.now(),
-        }));
+        clientWs.send(JSON.stringify({ type: 'utterance_end', timestamp: Date.now() }));
       }
     });
 
@@ -158,32 +141,74 @@ wss.on('connection', (clientWs: WebSocket) => {
     });
 
     dgConnection.on(LiveTranscriptionEvents.Close, () => {
-      console.log('🔌 Deepgram connection closed');
+      console.log('🔌 Deepgram closed');
       isDeepgramOpen = false;
+      stopKeepalive();
+
+      // Auto-reconnect if client is still connected and we have config
+      if (!closing && config && clientWs.readyState === WebSocket.OPEN) {
+        console.log('🔄 Auto-reconnecting Deepgram in 1s...');
+        setTimeout(() => {
+          if (!closing && config) openDeepgram(config);
+        }, 1000);
+      }
     });
+  }
+
+  function startKeepalive(): void {
+    stopKeepalive();
+    keepaliveTimer = setInterval(() => {
+      if (dgConnection && isDeepgramOpen) {
+        try {
+          dgConnection.keepAlive();
+        } catch {}
+      }
+    }, KEEPALIVE_INTERVAL_MS);
+  }
+
+  function stopKeepalive(): void {
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+    }
+  }
+
+  function sendAudio(data: Buffer): void {
+    const arrayBuffer = data.buffer.slice(
+      data.byteOffset,
+      data.byteOffset + data.byteLength,
+    ) as ArrayBuffer;
+
+    audioChunkCount++;
+
+    // Log first audio arrival
+    if (audioChunkCount === 1) {
+      console.log('🎤 First audio chunk received');
+    }
+
+    // Log periodically
+    if (audioChunkCount % 500 === 0) {
+      console.log(`🎤 Audio chunks: ${audioChunkCount}`);
+    }
+
+    // Open Deepgram on first audio if we have config but no connection
+    if (!dgConnection && config) {
+      console.log('🎤 Audio arrived — opening Deepgram...');
+      openDeepgram(config);
+    }
+
+    if (isDeepgramOpen && dgConnection) {
+      dgConnection.send(arrayBuffer);
+    }
+    // If Deepgram isn't open yet, audio is lost — but openDeepgram was triggered
+    // and will start receiving subsequent chunks once ready
   }
 
   // Handle messages from client
   clientWs.on('message', (data: Buffer, isBinary: boolean) => {
     if (isBinary) {
-      // Binary = PCM audio
-      const arrayBuffer = data.buffer.slice(
-        data.byteOffset,
-        data.byteOffset + data.byteLength,
-      ) as ArrayBuffer;
-
-      if (isDeepgramOpen && dgConnection) {
-        dgConnection.send(arrayBuffer);
-      } else if (config) {
-        // Deepgram not ready yet — queue the audio
-        audioQueue.push(arrayBuffer);
-        // Cap the queue (don't buffer more than ~5s of audio)
-        if (audioQueue.length > 250) {
-          audioQueue.shift();
-        }
-      }
+      sendAudio(data);
     } else {
-      // Text = JSON config
       try {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'config') {
@@ -193,30 +218,32 @@ wss.on('connection', (clientWs: WebSocket) => {
             profanityFilter: msg.profanityFilter ?? false,
           };
 
-          // Only open/reopen if config changed or first config
           const configChanged = !config
             || newConfig.language !== config.language
             || newConfig.smartFormat !== config.smartFormat
             || newConfig.profanityFilter !== config.profanityFilter;
 
           config = newConfig;
+          console.log(`⚙️  Config: lang=${config.language}, smart=${config.smartFormat}, profanity=${config.profanityFilter}`);
 
-          if (configChanged) {
-            console.log(`⚙️  Config: lang=${config.language}, smart=${config.smartFormat}, profanity=${config.profanityFilter}`);
+          // Only reopen if Deepgram is already running and config changed
+          if (configChanged && dgConnection) {
             openDeepgram(config);
           }
+          // If no dgConnection yet, it'll open when first audio arrives
         }
       } catch (err) {
-        console.error('❌ Failed to parse config:', err);
+        console.error('❌ Parse error:', err);
       }
     }
   });
 
   clientWs.on('close', () => {
-    console.log('📱 Client disconnected');
-    audioQueue = [];
-    if (isDeepgramOpen && dgConnection) {
-      dgConnection.requestClose();
+    console.log(`📱 Client disconnected (${audioChunkCount} audio chunks sent)`);
+    closing = true;
+    stopKeepalive();
+    if (dgConnection && isDeepgramOpen) {
+      try { dgConnection.requestClose(); } catch {}
     }
   });
 
