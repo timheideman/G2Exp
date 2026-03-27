@@ -45,18 +45,41 @@ export class BrowserAudioCapture {
 
       // Browser chooses its own sample rate — we'll resample
       this.audioContext = new AudioContext();
+
+      // Resume AudioContext if suspended (browser autoplay policy)
+      if (this.audioContext.state === 'suspended') {
+        console.log('[BrowserAudio] AudioContext suspended, resuming...');
+        await this.audioContext.resume();
+      }
+      console.log(`[BrowserAudio] AudioContext state: ${this.audioContext.state}`);
+
       this.nativeSampleRate = this.audioContext.sampleRate;
       console.log(`[BrowserAudio] Native sample rate: ${this.nativeSampleRate} Hz`);
 
       this.source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
+      // Check that the stream has audio tracks
+      const tracks = this.mediaStream.getAudioTracks();
+      console.log(`[BrowserAudio] Audio tracks: ${tracks.length}, enabled: ${tracks[0]?.enabled}`);
+
       // 4096 samples per buffer
       this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
 
+      let chunkCount = 0;
       this.processor.onaudioprocess = (event) => {
         if (!this.onAudioData) return;
 
         const float32 = event.inputBuffer.getChannelData(0);
+
+        chunkCount++;
+        if (chunkCount === 1) {
+          console.log(`[BrowserAudio] First audio chunk (${float32.length} samples)`);
+        }
+        if (chunkCount % 100 === 0) {
+          // Log RMS level every ~100 chunks to verify audio is flowing
+          const rms = Math.sqrt(float32.reduce((sum, s) => sum + s * s, 0) / float32.length);
+          console.log(`[BrowserAudio] Chunks: ${chunkCount}, RMS: ${rms.toFixed(4)}`);
+        }
 
         // Resample to 16kHz if needed
         const resampled = this.nativeSampleRate === BrowserAudioCapture.TARGET_SAMPLE_RATE

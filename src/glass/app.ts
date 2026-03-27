@@ -177,7 +177,11 @@ export class LiveCaptionApp {
   }
 
   async toggleBrowserCapture(): Promise<void> {
-    if (!this.browserAudio) return;
+    if (!this.browserAudio) {
+      console.error('[LiveCaption] No browserAudio — not in browser mode?');
+      this.setStatus('Error: audio not available', false);
+      return;
+    }
 
     if (this.browserAudio.isCapturing) {
       await this.browserAudio.stop();
@@ -185,10 +189,16 @@ export class LiveCaptionApp {
       this.display.addFinal(-1, '── Paused ──');
       this.setStatus('Paused', false);
     } else {
-      await this.browserAudio.start();
-      this.isListening = true;
-      this.display.addFinal(-1, '── Resumed ──');
-      this.setStatus('Listening...', true);
+      this.setStatus('Requesting mic access...', false);
+      try {
+        await this.browserAudio.start();
+        this.isListening = true;
+        this.setStatus('Listening (mic active)...', true);
+      } catch (err: any) {
+        console.error('[LiveCaption] Mic error:', err);
+        this.setStatus(`Mic error: ${err.message || 'denied'}`, false);
+        return;
+      }
     }
     this.updateDisplay();
   }
