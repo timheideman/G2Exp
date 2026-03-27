@@ -68,20 +68,18 @@ export class LiveCaptionApp {
   }
 
   private async detectMode(): Promise<AppMode> {
-    try {
-      const bridge = await Promise.race([
-        waitForEvenAppBridge(),
-        new Promise<null>((_, reject) =>
-          setTimeout(() => reject(new Error('timeout')), 2000)
-        ),
-      ]);
-      if (bridge) {
-        this.bridge = bridge;
+    // Check if the Even App bridge exists on window
+    // Don't call waitForEvenAppBridge() in regular browsers — it hangs/crashes
+    const win = window as any;
+    if (win.EvenAppBridge || win._evenAppBridge || win.flutter_inappwebview) {
+      try {
+        this.bridge = await waitForEvenAppBridge();
         return 'glasses';
+      } catch {
+        console.log('[LiveCaption] Bridge markers found but init failed');
       }
-    } catch {
-      // Bridge not available
     }
+    console.log('[LiveCaption] No G2 bridge — browser mode');
     return 'browser';
   }
 
