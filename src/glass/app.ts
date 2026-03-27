@@ -10,14 +10,8 @@
  * - Browser: uses getUserMedia + canvas simulator
  */
 
-import {
-  waitForEvenAppBridge,
-  TextContainerProperty,
-  TextContainerUpgrade,
-  CreateStartUpPageContainer,
-  OsEventTypeList,
-} from '@evenrealities/even_hub_sdk';
-import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
+// Even Hub SDK is loaded dynamically — it crashes in regular browsers
+// import { ... } from '@evenrealities/even_hub_sdk';
 import { TranscriptDisplay } from './transcript-display';
 import { BrowserAudioCapture } from './browser-audio';
 import { DisplaySimulator } from './display-simulator';
@@ -31,7 +25,8 @@ const WS_URL = (window as any).__LIVECAPTION_WS_URL__
 type AppMode = 'glasses' | 'browser';
 
 export class LiveCaptionApp {
-  private bridge: EvenAppBridge | null = null;
+  private bridge: any = null; // EvenAppBridge — loaded dynamically
+  private sdk: any = null;    // Even Hub SDK module
   private browserAudio: BrowserAudioCapture | null = null;
   private displaySim: DisplaySimulator | null = null;
   private display = new TranscriptDisplay();
@@ -68,15 +63,16 @@ export class LiveCaptionApp {
   }
 
   private async detectMode(): Promise<AppMode> {
-    // Check if the Even App bridge exists on window
-    // Don't call waitForEvenAppBridge() in regular browsers — it hangs/crashes
+    // Only load the Even Hub SDK if we're inside the Even App WebView
     const win = window as any;
     if (win.EvenAppBridge || win._evenAppBridge || win.flutter_inappwebview) {
       try {
-        this.bridge = await waitForEvenAppBridge();
+        this.sdk = await import('@evenrealities/even_hub_sdk');
+        this.bridge = await this.sdk.waitForEvenAppBridge();
+        console.log('[LiveCaption] G2 bridge connected');
         return 'glasses';
-      } catch {
-        console.log('[LiveCaption] Bridge markers found but init failed');
+      } catch (err) {
+        console.log('[LiveCaption] Bridge markers found but init failed:', err);
       }
     }
     console.log('[LiveCaption] No G2 bridge — browser mode');
@@ -106,6 +102,8 @@ export class LiveCaptionApp {
   // ─── Glasses Mode ───────────────────────────────────────────
 
   private async initGlasses(): Promise<void> {
+    const { TextContainerProperty, CreateStartUpPageContainer, OsEventTypeList } = this.sdk;
+
     const container = new TextContainerProperty({
       xPosition: 0,
       yPosition: 0,
@@ -124,9 +122,9 @@ export class LiveCaptionApp {
       containerTotalNum: 1,
       textObject: [container],
     });
-    await this.bridge!.createStartUpPageContainer(startup);
+    await this.bridge.createStartUpPageContainer(startup);
 
-    this.bridge!.onEvenHubEvent((event) => {
+    this.bridge.onEvenHubEvent((event: any) => {
       if (event.audioEvent?.audioPcm && this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(event.audioEvent.audioPcm);
       }
@@ -136,14 +134,15 @@ export class LiveCaptionApp {
       }
     });
 
-    await this.bridge!.audioControl(true);
+    await this.bridge.audioControl(true);
     this.isListening = true;
     this.setStatus('Listening...', true);
   }
 
   private async updateGlassesDisplay(text: string): Promise<void> {
     try {
-      await this.bridge!.textContainerUpgrade(new TextContainerUpgrade({
+      const { TextContainerUpgrade } = this.sdk;
+      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
         containerID: this.containerId,
         containerName: this.containerName,
         contentOffset: 0,
