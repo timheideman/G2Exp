@@ -37,7 +37,7 @@ export const DEFAULT_SETTINGS: LiveCaptionSettings = {
   smartFormat: true,
   profanityFilter: false,
   fontSize: 'medium',
-  idMode: 'anonymous',
+  idMode: 'contacts',
 };
 
 /** Message sent from client → server to configure the Deepgram session */
