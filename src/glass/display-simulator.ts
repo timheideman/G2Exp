@@ -65,42 +65,44 @@ export class DisplaySimulator {
     const W = DisplaySimulator.WIDTH;
     const H = DisplaySimulator.HEIGHT;
 
-    // Clear to black
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, W, H);
 
-    // Set up green monospace text
     ctx.font = '14px "SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace';
     ctx.textBaseline = 'top';
 
-    const lines = text.split('\n');
     const lineHeight = 22;
     const paddingX = 14;
-    const paddingY = 12;
+    const paddingY = 10;
+    const maxWidth = W - paddingX * 2;
     const maxLines = Math.floor((H - paddingY * 2) / lineHeight);
 
-    // Render from bottom up (most recent at bottom)
-    const visibleLines = lines.slice(-maxLines);
+    // Word-wrap all lines
+    const rawLines = text.split('\n');
+    const wrappedLines: string[] = [];
+    for (const line of rawLines) {
+      const wrapped = this.wordWrap(ctx, line, maxWidth);
+      wrappedLines.push(...wrapped);
+    }
+
+    // Keep only the most recent lines that fit
+    const visibleLines = wrappedLines.slice(-maxLines);
     const totalLines = visibleLines.length;
 
     for (let i = 0; i < totalLines; i++) {
       const line = visibleLines[i];
       const y = paddingY + i * lineHeight;
 
-      // Fade: older lines are dimmer
       const age = (totalLines - 1 - i) / Math.max(totalLines - 1, 1);
       const brightness = this.getBrightness(age);
 
-      // Check for interim cursor
       if (line.includes('━')) {
         const parts = line.split('━');
-        // Render text part
         ctx.fillStyle = brightness;
         ctx.shadowColor = brightness;
         ctx.shadowBlur = 4;
         ctx.fillText(parts[0], paddingX, y);
 
-        // Render blinking cursor
         const textWidth = ctx.measureText(parts[0]).width;
         const cursorOpacity = 0.5 + 0.5 * Math.sin(Date.now() / 300);
         ctx.globalAlpha = cursorOpacity;
@@ -115,6 +117,30 @@ export class DisplaySimulator {
     }
 
     ctx.shadowBlur = 0;
+  }
+
+  /** Word-wrap a line to fit within maxWidth pixels */
+  private wordWrap(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+    if (!text) return [''];
+    if (ctx.measureText(text).width <= maxWidth) return [text];
+
+    const words = text.split(' ');
+    const lines: string[] = [];
+    let currentLine = '';
+
+    for (const word of words) {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      if (ctx.measureText(testLine).width <= maxWidth) {
+        currentLine = testLine;
+      } else {
+        if (currentLine) lines.push(currentLine);
+        // If a single word is wider than maxWidth, force it on its own line
+        currentLine = word;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+
+    return lines;
   }
 
   /** Get green color based on age (0 = newest/brightest, 1 = oldest/dimmest) */
