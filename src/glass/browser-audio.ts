@@ -37,8 +37,9 @@ export class BrowserAudioCapture {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
+          // Disable processing that blends voices — hurts diarization
+          echoCancellation: false,
+          noiseSuppression: false,
           autoGainControl: true,
         },
       });

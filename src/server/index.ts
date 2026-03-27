@@ -68,12 +68,16 @@ wss.on('connection', (clientWs: WebSocket) => {
       smart_format: cfg.smartFormat,
       diarize: true,
       interim_results: true,
-      utterance_end_ms: 1500,
+      utterance_end_ms: 2000,
       vad_events: true,
       profanity_filter: cfg.profanityFilter,
       encoding: 'linear16',
       sample_rate: 16000,
       channels: 1,
+      // Disable browser-side audio processing hints so Deepgram gets raw audio
+      multichannel: false,
+      no_delay: true,
+      endpointing: 300,
     });
 
     dgConnection.on(LiveTranscriptionEvents.Open, () => {
