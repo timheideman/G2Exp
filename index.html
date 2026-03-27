@@ -17,120 +17,126 @@
       padding: 24px 16px;
     }
 
-    /* Header */
-    .header {
-      text-align: center;
-      margin-bottom: 20px;
-    }
-    .header h1 {
-      font-size: 22px;
-      font-weight: 500;
-      letter-spacing: -0.5px;
-    }
-    .header .subtitle {
-      font-size: 13px;
-      color: #666;
-      margin-top: 4px;
-    }
+    .header { text-align: center; margin-bottom: 16px; }
+    .header h1 { font-size: 22px; font-weight: 500; letter-spacing: -0.5px; }
+    .header .subtitle { font-size: 13px; color: #666; margin-top: 4px; }
+
     .status {
-      font-size: 14px;
-      color: #7b7b7b;
-      margin-bottom: 20px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      font-size: 14px; color: #7b7b7b; margin-bottom: 16px;
+      display: flex; align-items: center; gap: 8px;
     }
     .status::before {
-      content: '';
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #555;
+      content: ''; display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; background: #555;
     }
     .status.connected::before { background: #4BB956; }
     .status.error::before { background: #FF453A; }
 
     /* Glasses simulator */
-    .sim-container {
-      margin-bottom: 20px;
-      position: relative;
-    }
+    .sim-container { margin-bottom: 16px; position: relative; }
     .sim-label {
-      text-align: center;
-      font-size: 11px;
-      color: #333;
-      margin-top: 8px;
-      letter-spacing: 1.5px;
-      text-transform: uppercase;
+      text-align: center; font-size: 11px; color: #333;
+      margin-top: 8px; letter-spacing: 1.5px; text-transform: uppercase;
     }
 
-    /* Controls */
-    .controls {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 20px;
-    }
+    /* Controls row */
+    .controls { display: flex; gap: 10px; margin-bottom: 16px; }
     .btn {
-      background: #1a1a1a;
-      color: #ccc;
-      border: 1px solid #333;
-      border-radius: 8px;
-      padding: 10px 24px;
-      font-size: 14px;
-      cursor: pointer;
-      transition: all 0.15s;
+      background: #1a1a1a; color: #ccc; border: 1px solid #333;
+      border-radius: 8px; padding: 10px 24px; font-size: 14px;
+      cursor: pointer; transition: all 0.15s;
     }
     .btn:hover { background: #252525; border-color: #444; }
-    .btn.active {
-      background: #0d2818;
-      color: #4BB956;
-      border-color: #1a4028;
-    }
+    .btn.active { background: #0d2818; color: #4BB956; border-color: #1a4028; }
     .btn.active:hover { background: #0f3320; }
 
-    /* Text transcript preview */
+    /* Settings panel */
+    .settings {
+      width: 100%; max-width: 576px; background: #111;
+      border: 1px solid #222; border-radius: 10px;
+      margin-bottom: 16px; overflow: hidden;
+    }
+    .settings-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 16px; cursor: pointer; user-select: none;
+    }
+    .settings-header h3 { font-size: 14px; font-weight: 500; color: #aaa; }
+    .settings-header .chevron {
+      font-size: 12px; color: #555; transition: transform 0.2s;
+    }
+    .settings-header.open .chevron { transform: rotate(180deg); }
+    .settings-body {
+      display: none; padding: 0 16px 16px;
+      border-top: 1px solid #1a1a1a;
+    }
+    .settings-body.open { display: block; }
+
+    .setting-group { margin-top: 14px; }
+    .setting-group label {
+      display: block; font-size: 12px; color: #666;
+      margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+
+    /* Language grid */
+    .lang-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+    }
+    .lang-option {
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 10px; background: #1a1a1a; border: 1px solid #2a2a2a;
+      border-radius: 6px; cursor: pointer; font-size: 13px;
+      transition: all 0.15s;
+    }
+    .lang-option:hover { background: #222; border-color: #333; }
+    .lang-option.selected {
+      background: #0d2818; border-color: #1a4028; color: #4BB956;
+    }
+    .lang-option .flag { font-size: 16px; }
+    .lang-option .name { color: inherit; }
+
+    /* Toggle switches */
+    .toggle-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 0;
+    }
+    .toggle-row + .toggle-row { border-top: 1px solid #1a1a1a; }
+    .toggle-label { font-size: 14px; color: #ccc; }
+    .toggle-desc { font-size: 11px; color: #555; margin-top: 2px; }
+    .toggle {
+      position: relative; width: 44px; height: 24px;
+      background: #333; border-radius: 12px; cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle.on { background: #1a6030; }
+    .toggle::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 20px; height: 20px; background: #ccc;
+      border-radius: 50%; transition: transform 0.2s;
+    }
+    .toggle.on::after { transform: translateX(20px); background: #4BB956; }
+
+    /* Transcript preview */
     .preview-label {
-      font-size: 12px;
-      color: #444;
-      margin-bottom: 6px;
-      align-self: flex-start;
-      max-width: 576px;
-      width: 100%;
+      font-size: 12px; color: #444; margin-bottom: 6px;
+      align-self: flex-start; max-width: 576px; width: 100%;
     }
     .transcript-preview {
-      width: 100%;
-      max-width: 576px;
-      background: #111;
-      border: 1px solid #222;
-      border-radius: 8px;
+      width: 100%; max-width: 576px; background: #111;
+      border: 1px solid #222; border-radius: 8px;
       padding: 14px 16px;
       font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-      font-size: 13px;
-      line-height: 1.6;
-      color: #4BB956;
-      white-space: pre-wrap;
-      min-height: 120px;
-      max-height: 200px;
+      font-size: 13px; line-height: 1.6; color: #4BB956;
+      white-space: pre-wrap; min-height: 100px; max-height: 180px;
       overflow-y: auto;
     }
 
-    /* Hints */
     .hint {
-      margin-top: 20px;
-      font-size: 12px;
-      color: #444;
-      text-align: center;
-      max-width: 440px;
-      line-height: 1.6;
+      margin-top: 16px; font-size: 12px; color: #444;
+      text-align: center; max-width: 440px; line-height: 1.6;
     }
     .hint kbd {
-      background: #1a1a1a;
-      border: 1px solid #333;
-      border-radius: 3px;
-      padding: 1px 5px;
-      font-size: 11px;
-      color: #888;
+      background: #1a1a1a; border: 1px solid #333;
+      border-radius: 3px; padding: 1px 5px; font-size: 11px; color: #888;
     }
   </style>
 </head>
@@ -142,7 +148,7 @@
 
   <div class="status" id="status">Initializing...</div>
 
-  <!-- G2 display simulator (only shown in browser mode) -->
+  <!-- G2 display simulator -->
   <div class="sim-container">
     <div id="glasses-sim"></div>
     <div class="sim-label">G2 Display Preview · 576 × 288</div>
@@ -151,6 +157,37 @@
   <div class="controls">
     <button class="btn" id="btn-toggle">🎙 Start Listening</button>
     <button class="btn" id="btn-clear">Clear</button>
+  </div>
+
+  <!-- Settings panel -->
+  <div class="settings">
+    <div class="settings-header" id="settings-toggle">
+      <h3>⚙️ Settings</h3>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="settings-body" id="settings-body">
+      <div class="setting-group">
+        <label>Language</label>
+        <div class="lang-grid" id="lang-grid"></div>
+      </div>
+
+      <div class="setting-group">
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Smart Formatting</div>
+            <div class="toggle-desc">Auto-capitalize, punctuate, format numbers</div>
+          </div>
+          <div class="toggle on" id="toggle-smart" data-setting="smartFormat"></div>
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Profanity Filter</div>
+            <div class="toggle-desc">Replace profanity with asterisks</div>
+          </div>
+          <div class="toggle" id="toggle-profanity" data-setting="profanityFilter"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="preview-label">Raw Transcript</div>

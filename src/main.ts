@@ -1,19 +1,26 @@
 /**
  * LiveCaption — Entry Point
  *
- * Bootstraps the app and wires up the companion UI.
- * Auto-detects G2 glasses vs browser mode.
+ * Bootstraps the app, wires up the companion UI,
+ * and initializes the settings panel.
  */
 
 import { LiveCaptionApp } from './glass/app';
+import { LANGUAGES } from './types/settings';
 
 const app = new LiveCaptionApp();
 
-// Wire up companion UI elements
+// ─── UI Elements ──────────────────────────────────────────────
+
 const statusEl = document.getElementById('status');
 const previewEl = document.getElementById('preview');
 const btnToggle = document.getElementById('btn-toggle');
 const btnClear = document.getElementById('btn-clear');
+const settingsToggle = document.getElementById('settings-toggle');
+const settingsBody = document.getElementById('settings-body');
+const langGrid = document.getElementById('lang-grid');
+
+// ─── Status & Transcript Callbacks ────────────────────────────
 
 app.onStatusChange = (text: string, connected: boolean) => {
   if (statusEl) {
@@ -29,21 +36,82 @@ app.onTranscriptUpdate = (text: string) => {
   }
 };
 
-// Toggle button
-btnToggle?.addEventListener('click', () => {
-  app.toggleBrowserCapture();
-  const isListening = btnToggle.textContent === '⏸ Pause';
-  btnToggle.textContent = isListening ? '🎙 Start Listening' : '⏸ Pause';
-  btnToggle.className = isListening ? 'btn' : 'btn active';
+// ─── Toggle Listening ─────────────────────────────────────────
+
+let listening = false;
+btnToggle?.addEventListener('click', async () => {
+  await app.toggleBrowserCapture();
+  listening = !listening;
+  if (btnToggle) {
+    btnToggle.textContent = listening ? '⏸ Pause' : '🎙 Start Listening';
+    btnToggle.className = listening ? 'btn active' : 'btn';
+  }
 });
 
-// Clear button
 btnClear?.addEventListener('click', () => {
   app.clearTranscript();
   if (previewEl) previewEl.textContent = 'Waiting for audio...';
 });
 
-// Boot
+// ─── Settings Panel ───────────────────────────────────────────
+
+// Toggle settings visibility
+settingsToggle?.addEventListener('click', () => {
+  const isOpen = settingsBody?.classList.toggle('open');
+  settingsToggle.classList.toggle('open', isOpen);
+});
+
+// Build language grid
+function buildLanguageGrid(): void {
+  if (!langGrid) return;
+  const currentLang = app.settings.current.language.code;
+
+  langGrid.innerHTML = '';
+  for (const lang of LANGUAGES) {
+    const el = document.createElement('div');
+    el.className = `lang-option ${lang.code === currentLang ? 'selected' : ''}`;
+    el.innerHTML = `<span class="flag">${lang.flag}</span><span class="name">${lang.label}</span>`;
+    el.addEventListener('click', () => {
+      app.settings.setLanguage(lang.code);
+      // Update UI selection
+      langGrid.querySelectorAll('.lang-option').forEach(o => o.classList.remove('selected'));
+      el.classList.add('selected');
+    });
+    langGrid.appendChild(el);
+  }
+}
+
+// Initialize toggles
+function initToggles(): void {
+  const settings = app.settings.current;
+
+  const smartToggle = document.getElementById('toggle-smart');
+  const profanityToggle = document.getElementById('toggle-profanity');
+
+  if (smartToggle) {
+    smartToggle.classList.toggle('on', settings.smartFormat);
+    smartToggle.addEventListener('click', () => {
+      const newValue = !app.settings.current.smartFormat;
+      app.settings.update({ smartFormat: newValue });
+      smartToggle.classList.toggle('on', newValue);
+    });
+  }
+
+  if (profanityToggle) {
+    profanityToggle.classList.toggle('on', settings.profanityFilter);
+    profanityToggle.addEventListener('click', () => {
+      const newValue = !app.settings.current.profanityFilter;
+      app.settings.update({ profanityFilter: newValue });
+      profanityToggle.classList.toggle('on', newValue);
+    });
+  }
+}
+
+// ─── Boot ─────────────────────────────────────────────────────
+
+buildLanguageGrid();
+initToggles();
+
 app.init().then(() => {
   console.log('[LiveCaption] Ready');
 }).catch((err) => {
@@ -54,7 +122,6 @@ app.init().then(() => {
   }
 });
 
-// Clean up
 window.addEventListener('beforeunload', () => {
   app.destroy();
 });

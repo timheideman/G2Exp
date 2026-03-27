@@ -21,6 +21,8 @@ import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { TranscriptDisplay } from './transcript-display';
 import { BrowserAudioCapture } from './browser-audio';
 import { DisplaySimulator } from './display-simulator';
+import { SettingsManager } from './settings-manager';
+import type { LiveCaptionSettings, ConfigMessage } from '../types/settings';
 
 // Server URL — configurable via window global or defaults to same host
 const WS_URL = (window as any).__LIVECAPTION_WS_URL__
@@ -41,11 +43,16 @@ export class LiveCaptionApp {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private lastRenderedText = '';
 
+  readonly settings = new SettingsManager();
+
   // Callbacks for UI integration
   onStatusChange?: (status: string, connected: boolean) => void;
   onTranscriptUpdate?: (text: string) => void;
 
   async init(): Promise<void> {
+    // Listen for settings changes
+    this.settings.onChange((s) => this.onSettingsChanged(s));
+
     // Detect environment
     this.mode = await this.detectMode();
     console.log(`[LiveCaption] Mode: ${this.mode}`);
@@ -60,10 +67,8 @@ export class LiveCaptionApp {
     this.connectWebSocket();
   }
 
-  /** Detect if running on G2 glasses or in browser */
   private async detectMode(): Promise<AppMode> {
     try {
-      // Try to get the bridge with a short timeout
       const bridge = await Promise.race([
         waitForEvenAppBridge(),
         new Promise<null>((_, reject) =>
@@ -75,9 +80,29 @@ export class LiveCaptionApp {
         return 'glasses';
       }
     } catch {
-      // Bridge not available — browser mode
+      // Bridge not available
     }
     return 'browser';
+  }
+
+  // ─── Settings ───────────────────────────────────────────────
+
+  private onSettingsChanged(settings: LiveCaptionSettings): void {
+    // Send config update to server
+    this.sendConfig(settings);
+  }
+
+  private sendConfig(settings: LiveCaptionSettings): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+
+    const msg: ConfigMessage = {
+      type: 'config',
+      language: settings.language.code,
+      smartFormat: settings.smartFormat,
+      profanityFilter: settings.profanityFilter,
+    };
+    this.ws.send(JSON.stringify(msg));
+    console.log(`[LiveCaption] Config sent: lang=${msg.language}`);
   }
 
   // ─── Glasses Mode ───────────────────────────────────────────
@@ -103,20 +128,16 @@ export class LiveCaptionApp {
     });
     await this.bridge!.createStartUpPageContainer(startup);
 
-    // Input events
     this.bridge!.onEvenHubEvent((event) => {
-      // Audio forwarding
       if (event.audioEvent?.audioPcm && this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(event.audioEvent.audioPcm);
       }
-      // Double-tap to toggle
       const eventType = event.textEvent?.eventType ?? event.sysEvent?.eventType;
       if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
         this.toggleListening();
       }
     });
 
-    // Start mic
     await this.bridge!.audioControl(true);
     this.isListening = true;
     this.setStatus('Listening...', true);
@@ -139,14 +160,12 @@ export class LiveCaptionApp {
   // ─── Browser Mode ───────────────────────────────────────────
 
   private initBrowser(): void {
-    // Set up display simulator
     const simContainer = document.getElementById('glasses-sim');
     if (simContainer) {
       this.displaySim = new DisplaySimulator(simContainer, 1);
       this.displaySim.startAnimation();
     }
 
-    // Set up browser audio capture
     this.browserAudio = new BrowserAudioCapture();
     this.browserAudio.onData((pcm) => {
       if (this.ws?.readyState === WebSocket.OPEN) {
@@ -157,7 +176,6 @@ export class LiveCaptionApp {
     this.setStatus('Ready — click Start to begin', false);
   }
 
-  /** Start/stop browser audio capture (called from UI button) */
   async toggleBrowserCapture(): Promise<void> {
     if (!this.browserAudio) return;
 
@@ -184,12 +202,22 @@ export class LiveCaptionApp {
 
     this.ws.onopen = () => {
       console.log('[LiveCaption] Server connected');
+      // Send current settings on connect
+      this.sendConfig(this.settings.current);
       this.setStatus(this.isListening ? 'Listening...' : 'Connected — ready', true);
     };
 
     this.ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data as string);
+        if (msg.type === 'server_ready') {
+          const lang = msg.config?.language || 'multi';
+          this.setStatus(
+            this.isListening ? `Listening (${lang})...` : `Connected (${lang})`,
+            true,
+          );
+          return;
+        }
         this.handleTranscript(msg);
       } catch (err) {
         console.error('[LiveCaption] Parse error:', err);
@@ -227,14 +255,12 @@ export class LiveCaptionApp {
     if (text === this.lastRenderedText) return;
     this.lastRenderedText = text;
 
-    // Update glasses or simulator
     if (this.mode === 'glasses') {
       this.updateGlassesDisplay(text);
     } else if (this.displaySim) {
       this.displaySim.update(text);
     }
 
-    // Notify companion UI
     if (this.onTranscriptUpdate) {
       this.onTranscriptUpdate(text);
     }
@@ -271,14 +297,12 @@ export class LiveCaptionApp {
     }, 3000);
   }
 
-  /** Clear transcript */
   clearTranscript(): void {
     this.display.clear();
     this.lastRenderedText = '';
     this.updateDisplay();
   }
 
-  /** Get current speakers */
   getSpeakers() {
     return this.display.getSpeakers();
   }
