@@ -18,6 +18,13 @@ export class TranscriptDisplay {
   private interimLine: TranscriptLine | null = null;
   private speakerLabels: Map<number, SpeakerLabel> = new Map();
   private nextSpeakerIndex = 0;
+  /** Optional external name resolver (from SessionLabels) */
+  private nameResolver: ((speakerIndex: number) => string) | null = null;
+
+  /** Set an external name resolver for speaker display names */
+  setNameResolver(resolver: (speakerIndex: number) => string): void {
+    this.nameResolver = resolver;
+  }
 
   /** Get or create a label for a speaker index */
   private getLabel(speakerIndex: number): SpeakerLabel {
@@ -95,7 +102,11 @@ export class TranscriptDisplay {
 
     for (const line of allLines) {
       const label = this.getLabel(line.speaker);
-      const prefix = line.speaker !== lastSpeaker ? `[${label.letter}] ` : '    ';
+      // Use external name resolver if available, else fall back to letter
+      const tag = this.nameResolver && line.speaker >= 0
+        ? this.nameResolver(line.speaker)
+        : label.letter;
+      const prefix = line.speaker !== lastSpeaker ? `[${tag}] ` : '    ';
       const suffix = line.isFinal ? '' : ' ━'; // Blinking cursor for interim
       const lineText = `${prefix}${line.text}${suffix}\n`;
       output += lineText;

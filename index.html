@@ -103,6 +103,52 @@
     .lang-option .flag { font-size: 16px; }
     .lang-option .name { color: inherit; }
 
+    /* Mode toggle */
+    .mode-toggle {
+      display: flex; gap: 6px;
+    }
+    .mode-btn {
+      flex: 1; padding: 10px; background: #1a1a1a; border: 1px solid #2a2a2a;
+      border-radius: 6px; color: #888; font-size: 13px; cursor: pointer;
+      transition: all 0.15s; text-align: center;
+    }
+    .mode-btn:hover { background: #222; }
+    .mode-btn.selected {
+      background: #0d2818; border-color: #1a4028; color: #4BB956;
+    }
+
+    /* Speaker list items */
+    .speaker-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 0; border-bottom: 1px solid #1a1a1a;
+    }
+    .speaker-item:last-child { border-bottom: none; }
+    .speaker-tag {
+      display: inline-block; width: 28px; height: 28px; border-radius: 50%;
+      background: #1a3020; color: #4BB956; font-size: 12px; font-weight: 600;
+      text-align: center; line-height: 28px; margin-right: 10px;
+    }
+    .speaker-name { font-size: 14px; color: #ccc; }
+    .speaker-type { font-size: 11px; color: #555; margin-left: 6px; }
+    .speaker-name-input {
+      background: #1a1a1a; border: 1px solid #333; border-radius: 4px;
+      color: #ccc; padding: 4px 8px; font-size: 13px; width: 120px;
+    }
+
+    /* Contact list items */
+    .contact-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; border-bottom: 1px solid #1a1a1a;
+    }
+    .contact-item:last-child { border-bottom: none; }
+    .contact-name { font-size: 14px; color: #ccc; }
+    .contact-meta { font-size: 11px; color: #555; }
+    .contact-delete {
+      background: none; border: none; color: #555; cursor: pointer;
+      font-size: 16px; padding: 4px 8px;
+    }
+    .contact-delete:hover { color: #FF453A; }
+
     /* Toggle switches */
     .toggle-row {
       display: flex; justify-content: space-between; align-items: center;
@@ -181,6 +227,22 @@
       </div>
 
       <div class="setting-group">
+        <label>Speaker Identification</label>
+        <div class="mode-toggle">
+          <button class="mode-btn selected" id="mode-anonymous" data-mode="anonymous">
+            🔒 Anonymous
+          </button>
+          <button class="mode-btn" id="mode-contacts" data-mode="contacts">
+            👤 Contacts
+          </button>
+        </div>
+        <div style="font-size:11px;color:#555;margin-top:6px;line-height:1.4;">
+          <strong>Anonymous:</strong> Speakers get letters (A, B, C). Nothing saved.<br>
+          <strong>Contacts:</strong> Match against saved voiceprints. Unknown speakers stay anonymous.
+        </div>
+      </div>
+
+      <div class="setting-group">
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Smart Formatting</div>
@@ -195,6 +257,40 @@
           </div>
           <div class="toggle" id="toggle-profanity" data-setting="profanityFilter"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session Speakers (live during conversation) -->
+  <div class="settings" id="speakers-panel" style="display:none;">
+    <div class="settings-header" id="speakers-toggle">
+      <h3>🗣️ Speakers in this session</h3>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="settings-body open" id="speakers-body">
+      <div id="speakers-list" style="font-size:13px;color:#888;padding:8px 0;">
+        No speakers detected yet.
+      </div>
+    </div>
+  </div>
+
+  <!-- Contacts Management -->
+  <div class="settings">
+    <div class="settings-header" id="contacts-toggle">
+      <h3>👤 Saved Contacts (<span id="contacts-count">0</span>)</h3>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="settings-body" id="contacts-body">
+      <div id="contacts-list" style="padding:8px 0;">
+        <div style="font-size:13px;color:#555;">No contacts saved yet.</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+        <button class="btn" id="btn-export" style="font-size:12px;padding:6px 14px;">📤 Export All</button>
+        <button class="btn" id="btn-delete-all" style="font-size:12px;padding:6px 14px;color:#FF453A;border-color:#3a1a1a;">🗑️ Delete All</button>
+      </div>
+      <div style="font-size:10px;color:#444;margin-top:10px;line-height:1.5;">
+        🔒 Voiceprints are stored on this device only. They never leave your phone.<br>
+        📋 Use Export to download a copy. Use Delete to permanently remove biometric data.
       </div>
     </div>
   </div>

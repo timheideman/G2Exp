@@ -29,7 +29,7 @@ export class LiveCaptionApp {
   private sdk: any = null;    // Even Hub SDK module
   private browserAudio: BrowserAudioCapture | null = null;
   private displaySim: DisplaySimulator | null = null;
-  private display = new TranscriptDisplay();
+  readonly display = new TranscriptDisplay();
   private ws: WebSocket | null = null;
   private isListening = false;
   private mode: AppMode = 'browser';

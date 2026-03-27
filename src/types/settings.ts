@@ -1,9 +1,13 @@
+import type { IdentificationMode } from './privacy';
+
 /** App settings configurable from the companion UI */
 export interface LiveCaptionSettings {
   language: LanguageOption;
   smartFormat: boolean;
   profanityFilter: boolean;
   fontSize: 'small' | 'medium' | 'large';
+  /** Speaker identification mode */
+  idMode: IdentificationMode;
 }
 
 export interface LanguageOption {
@@ -33,6 +37,7 @@ export const DEFAULT_SETTINGS: LiveCaptionSettings = {
   smartFormat: true,
   profanityFilter: false,
   fontSize: 'medium',
+  idMode: 'anonymous',
 };
 
 /** Message sent from client → server to configure the Deepgram session */

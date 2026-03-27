@@ -7,6 +7,9 @@
 
 import { LiveCaptionApp } from './glass/app';
 import { LANGUAGES } from './types/settings';
+import { ContactStore } from './glass/contact-store';
+import { SessionLabels } from './glass/session-labels';
+import type { IdentificationMode } from './types/privacy';
 
 const app = new LiveCaptionApp();
 
@@ -139,10 +142,191 @@ console.error = (...args: any[]) => {
 
 debugLog('App starting...');
 
+// ─── Contacts & Session Labels ────────────────────────────────
+
+const contactStore = new ContactStore();
+const sessionLabels = new SessionLabels();
+
+// Wire session labels into transcript display
+app.display.setNameResolver((speakerIndex) => sessionLabels.getShortTag(speakerIndex));
+
+// ─── Mode Toggle ──────────────────────────────────────────────
+
+function initModeToggle(): void {
+  const modeAnon = document.getElementById('mode-anonymous');
+  const modeContacts = document.getElementById('mode-contacts');
+  const currentMode = app.settings.current.idMode;
+
+  if (modeAnon && modeContacts) {
+    modeAnon.classList.toggle('selected', currentMode === 'anonymous');
+    modeContacts.classList.toggle('selected', currentMode === 'contacts');
+
+    const setMode = (mode: IdentificationMode) => {
+      app.settings.update({ idMode: mode });
+      modeAnon.classList.toggle('selected', mode === 'anonymous');
+      modeContacts.classList.toggle('selected', mode === 'contacts');
+      debugLog(`Mode: ${mode}`);
+    };
+
+    modeAnon.addEventListener('click', () => setMode('anonymous'));
+    modeContacts.addEventListener('click', () => setMode('contacts'));
+  }
+}
+
+// ─── Contacts Panel ───────────────────────────────────────────
+
+function renderContacts(): void {
+  const listEl = document.getElementById('contacts-list');
+  const countEl = document.getElementById('contacts-count');
+  if (!listEl || !countEl) return;
+
+  const contacts = contactStore.getAll();
+  countEl.textContent = String(contacts.length);
+
+  if (contacts.length === 0) {
+    listEl.innerHTML = '<div style="font-size:13px;color:#555;">No contacts saved yet.</div>';
+    return;
+  }
+
+  listEl.innerHTML = contacts.map(c => {
+    const created = new Date(c.createdAt).toLocaleDateString();
+    const lastMatch = c.lastMatchedAt
+      ? new Date(c.lastMatchedAt).toLocaleDateString()
+      : 'never';
+    return `
+      <div class="contact-item" data-id="${c.id}">
+        <div>
+          <div class="contact-name">${c.name}</div>
+          <div class="contact-meta">Added ${created} · Last matched: ${lastMatch}</div>
+        </div>
+        <button class="contact-delete" data-delete="${c.id}" title="Delete voiceprint">✕</button>
+      </div>
+    `;
+  }).join('');
+
+  // Wire delete buttons
+  listEl.querySelectorAll('[data-delete]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const id = (e.currentTarget as HTMLElement).getAttribute('data-delete');
+      if (id && confirm('Delete this contact and their voiceprint?')) {
+        contactStore.delete(id);
+        renderContacts();
+      }
+    });
+  });
+}
+
+function initContacts(): void {
+  const contactsToggle = document.getElementById('contacts-toggle');
+  const contactsBody = document.getElementById('contacts-body');
+  contactsToggle?.addEventListener('click', () => {
+    const isOpen = contactsBody?.classList.toggle('open');
+    contactsToggle.classList.toggle('open', isOpen);
+  });
+
+  // Export button
+  document.getElementById('btn-export')?.addEventListener('click', () => {
+    const data = contactStore.export();
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `livecaption-contacts-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    debugLog('Contacts exported');
+  });
+
+  // Delete all button
+  document.getElementById('btn-delete-all')?.addEventListener('click', () => {
+    if (confirm('Delete ALL saved contacts and voiceprints? This cannot be undone.')) {
+      contactStore.deleteAll();
+      renderContacts();
+      debugLog('All contacts deleted');
+    }
+  });
+
+  // Re-render on changes
+  contactStore.onChange(renderContacts);
+  renderContacts();
+}
+
+// ─── Speakers Panel (live session) ────────────────────────────
+
+function initSpeakersPanel(): void {
+  const panel = document.getElementById('speakers-panel');
+  const toggle = document.getElementById('speakers-toggle');
+  const body = document.getElementById('speakers-body');
+
+  toggle?.addEventListener('click', () => {
+    const isOpen = body?.classList.toggle('open');
+    toggle.classList.toggle('open', isOpen);
+  });
+
+  // Show panel when speakers are detected
+  app.onTranscriptUpdate = ((origCallback) => {
+    return (text: string) => {
+      origCallback?.(text);
+      updateSpeakersPanel();
+    };
+  })(app.onTranscriptUpdate);
+}
+
+function updateSpeakersPanel(): void {
+  const panel = document.getElementById('speakers-panel');
+  const listEl = document.getElementById('speakers-list');
+  const speakers = app.getSpeakers();
+
+  if (speakers.length === 0) return;
+  if (panel) panel.style.display = '';
+
+  if (!listEl) return;
+
+  listEl.innerHTML = speakers.map(s => {
+    const labels = sessionLabels.getAllLabels();
+    const labelInfo = labels.find(l => l.speakerIndex === s.index);
+    const displayName = sessionLabels.getDisplayName(s.index);
+    const typeLabel = labelInfo?.type === 'identified' ? '✅ identified'
+      : labelInfo?.type === 'labeled' ? '✏️ labeled'
+      : '';
+
+    return `
+      <div class="speaker-item">
+        <div style="display:flex;align-items:center;">
+          <span class="speaker-tag">${s.letter}</span>
+          <input class="speaker-name-input" data-speaker="${s.index}"
+            value="${labelInfo ? labelInfo.name : ''}"
+            placeholder="${displayName}" />
+          <span class="speaker-type">${typeLabel}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Wire up name inputs for session labeling
+  listEl.querySelectorAll('.speaker-name-input').forEach(input => {
+    input.addEventListener('change', (e) => {
+      const el = e.target as HTMLInputElement;
+      const idx = parseInt(el.getAttribute('data-speaker') || '0', 10);
+      const name = el.value.trim();
+      if (name) {
+        sessionLabels.setLabel(idx, name);
+        debugLog(`Labeled speaker ${idx} as "${name}"`);
+      } else {
+        sessionLabels.removeLabel(idx);
+      }
+    });
+  });
+}
+
 // ─── Boot ─────────────────────────────────────────────────────
 
 buildLanguageGrid();
 initToggles();
+initModeToggle();
+initContacts();
+initSpeakersPanel();
 
 app.init().then(() => {
   console.log('[LiveCaption] Ready');
