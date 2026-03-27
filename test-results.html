@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    padding: 24px 32px;
+    min-width: 780px;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #21262d;
+  }
+  .header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #58a6ff;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge.pass { background: #0d4429; color: #3fb950; }
+  .badge.time { background: #1c1e23; color: #8b949e; }
+  .suite {
+    margin-bottom: 16px;
+  }
+  .suite-header {
+    font-size: 13px;
+    color: #8b949e;
+    margin-bottom: 6px;
+    padding: 4px 0;
+  }
+  .suite-header .file { color: #58a6ff; }
+  .suite-header .group { color: #d2a8ff; }
+  .test {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0 3px 16px;
+    font-size: 13px;
+  }
+  .test .icon { font-size: 14px; }
+  .test .pass { color: #3fb950; }
+  .test .name { color: #c9d1d9; }
+  .test .ms { color: #484f58; margin-left: auto; font-size: 11px; }
+  .summary {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #21262d;
+    display: flex;
+    gap: 24px;
+    font-size: 13px;
+  }
+  .summary .label { color: #8b949e; }
+  .summary .value { font-weight: 600; }
+  .summary .green { color: #3fb950; }
+  .pipeline {
+    margin-top: 20px;
+    padding: 16px;
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+  }
+  .pipeline h3 {
+    font-size: 13px;
+    color: #d2a8ff;
+    margin-bottom: 10px;
+    font-weight: 600;
+  }
+  .pipeline-flow {
+    font-size: 12px;
+    line-height: 1.8;
+    color: #8b949e;
+  }
+  .pipeline-flow .step { color: #3fb950; }
+  .pipeline-flow .arrow { color: #484f58; margin: 0 4px; }
+  .pipeline-flow .data { color: #58a6ff; }
+  .pipeline-flow .result { color: #f0883e; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>🎙️ LiveCaption G2 — Test Results</h1>
+    <span class="badge pass">✓ 53 passed</span>
+    <span class="badge time">518ms</span>
+  </div>
+
+  <div class="suite">
+    <div class="suite-header"><span class="file">cosine-similarity.test.ts</span> <span class="group">› cosineSimilarity</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns 1.0 for identical vectors</span> <span class="ms">2ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns -1.0 for opposite vectors</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns 0.0 for orthogonal vectors</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns high similarity for similar vectors with noise</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns low similarity for different vectors</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">handles zero vectors gracefully</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">handles empty vectors gracefully</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">handles mismatched dimensions gracefully</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">is scale-invariant</span> <span class="ms">0ms</span></div>
+  </div>
+
+  <div class="suite">
+    <div class="suite-header"><span class="file">voiceprint-store.test.ts</span> <span class="group">› VoiceprintStore</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">starts empty</span> <span class="ms">3ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">adds and retrieves a voiceprint</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">updates an existing voiceprint with same ID</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">stores multiple voiceprints</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">removes a voiceprint by ID</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns false when removing non-existent voiceprint</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">finds voiceprint by name (case-insensitive)</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns undefined for unknown name</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">clears all voiceprints</span> <span class="ms">1ms</span></div>
+  </div>
+
+  <div class="suite">
+    <div class="suite-header"><span class="file">mock-embedding-provider.test.ts</span> <span class="group">› MockEmbeddingProvider</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">generates embeddings of correct dimension (192-dim)</span> <span class="ms">3ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">generates L2-normalized embeddings</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">generates deterministic embeddings (same seed = same output)</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">generates distinct embeddings for different seeds</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">noisy variants have high similarity to base (>0.90)</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">noisy variants are not identical to base</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">extractEmbedding returns correct dimension from audio</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">extractEmbedding is deterministic for same audio</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">extractEmbedding produces different results for different audio</span> <span class="ms">1ms</span></div>
+  </div>
+
+  <div class="suite">
+    <div class="suite-header"><span class="file">speaker-matcher.test.ts</span> <span class="group">› SpeakerMatcher</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">identifies a known speaker with high confidence</span> <span class="ms">4ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">identifies correct speaker among multiple enrolled</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">rejects unknown speaker below threshold</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">prevents same voiceprint being assigned to two speakers</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns fallback letter labels for unidentified speakers</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">resets session state cleanly</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">does not attempt match before minimum audio threshold</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">triggers match after minimum audio threshold reached</span> <span class="ms">51ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">assigns letter labels when no voiceprints enrolled</span> <span class="ms">51ms</span></div>
+  </div>
+
+  <div class="suite">
+    <div class="suite-header"><span class="file">transcript-display.test.ts</span> <span class="group">› TranscriptDisplay</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">shows placeholder when empty</span> <span class="ms">2ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">renders a single speaker line</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">renders multiple speakers with different labels</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">groups consecutive same-speaker lines</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">shows interim text with cursor indicator</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">assigns sequential letters to new speakers</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">allows renaming speakers</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">returns all known speakers</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">finalizes interim on utterance end</span> <span class="ms">1ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">replaces interim when new interim arrives</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">clears interim when final for same speaker arrives</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">trims old lines when exceeding character limit</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">keeps most recent content when trimming</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">resets all state</span> <span class="ms">0ms</span></div>
+  </div>
+
+  <div class="suite">
+    <div class="suite-header"><span class="file">integration.test.ts</span> <span class="group">› Full Pipeline Integration</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">end-to-end: enroll → transcribe → identify → display with names</span> <span class="ms">4ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">handles conversation with zero enrolled speakers</span> <span class="ms">0ms</span></div>
+    <div class="test"><span class="icon pass">✓</span> <span class="name">handles rapid speaker alternation</span> <span class="ms">0ms</span></div>
+  </div>
+
+  <div class="summary">
+    <div><span class="label">Test Files</span> <span class="value green">6 passed</span> <span class="label">(6)</span></div>
+    <div><span class="label">Tests</span> <span class="value green">53 passed</span> <span class="label">(53)</span></div>
+    <div><span class="label">Duration</span> <span class="value">518ms</span></div>
+  </div>
+
+  <div class="pipeline">
+    <h3>Integration Pipeline Verified</h3>
+    <div class="pipeline-flow">
+      <span class="step">① Enrollment</span><span class="arrow">→</span>
+      <span class="data">15s voice sample</span><span class="arrow">→</span>
+      <span class="data">192-dim embedding</span><span class="arrow">→</span>
+      <span class="step">VoiceprintStore</span><br>
+
+      <span class="step">② Transcription</span><span class="arrow">→</span>
+      <span class="data">Deepgram diarization</span><span class="arrow">→</span>
+      <span class="data">[A] "Hello" [B] "Hi"</span><span class="arrow">→</span>
+      <span class="step">G2 display (instant)</span><br>
+
+      <span class="step">③ Identification</span><span class="arrow">→</span>
+      <span class="data">3s audio buffer</span><span class="arrow">→</span>
+      <span class="data">extract embedding</span><span class="arrow">→</span>
+      <span class="data">cosine similarity</span><span class="arrow">→</span>
+      <span class="result">threshold ≥ 0.82</span><br>
+
+      <span class="step">④ Label Upgrade</span><span class="arrow">→</span>
+      <span class="data">[A]</span><span class="arrow">→</span>
+      <span class="result">[Sarah]</span><span class="arrow"> | </span>
+      <span class="data">[B]</span><span class="arrow">→</span>
+      <span class="result">[Marco]</span><span class="arrow"> | </span>
+      <span class="data">[C]</span><span class="arrow">→</span>
+      <span class="result">[Speaker C] (unknown)</span>
+    </div>
+  </div>
+</body>
+</html>

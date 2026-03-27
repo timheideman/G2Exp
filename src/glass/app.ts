@@ -2,8 +2,12 @@
  * LiveCaption — G2 Glasses App
  *
  * Main entry point for the glasses-side logic.
- * Captures audio from the G2 mic, streams to the backend,
- * and renders live transcription on the glasses display.
+ * Captures audio from the G2 mic (or browser mic as fallback),
+ * streams to the backend, and renders live transcription.
+ *
+ * Auto-detects environment:
+ * - G2 glasses: uses bridge for audio + display
+ * - Browser: uses getUserMedia + canvas simulator
  */
 
 import {
@@ -15,43 +19,70 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { TranscriptDisplay } from './transcript-display';
+import { BrowserAudioCapture } from './browser-audio';
+import { DisplaySimulator } from './display-simulator';
 
-// Configuration — server URL is injected at build time or passed via settings
+// Server URL — configurable via window global or defaults to same host
 const WS_URL = (window as any).__LIVECAPTION_WS_URL__
   || `ws://${window.location.hostname}:8080`;
 
+type AppMode = 'glasses' | 'browser';
+
 export class LiveCaptionApp {
-  private bridge!: EvenAppBridge;
+  private bridge: EvenAppBridge | null = null;
+  private browserAudio: BrowserAudioCapture | null = null;
+  private displaySim: DisplaySimulator | null = null;
   private display = new TranscriptDisplay();
   private ws: WebSocket | null = null;
   private isListening = false;
+  private mode: AppMode = 'browser';
   private containerId = 1;
   private containerName = 'caption';
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private lastRenderedText = '';
 
+  // Callbacks for UI integration
+  onStatusChange?: (status: string, connected: boolean) => void;
+  onTranscriptUpdate?: (text: string) => void;
+
   async init(): Promise<void> {
-    // Wait for the G2 bridge to be ready
-    this.bridge = await waitForEvenAppBridge();
-    console.log('[LiveCaption] Bridge ready');
+    // Detect environment
+    this.mode = await this.detectMode();
+    console.log(`[LiveCaption] Mode: ${this.mode}`);
 
-    // Create the initial display
-    await this.createDisplay();
-
-    // Set up input event handling
-    this.bridge.onEvenHubEvent((event) => {
-      this.handleEvent(event);
-    });
+    if (this.mode === 'glasses') {
+      await this.initGlasses();
+    } else {
+      this.initBrowser();
+    }
 
     // Connect to transcription server
     this.connectWebSocket();
-
-    // Start capturing audio
-    await this.startAudio();
   }
 
-  /** Create the initial glasses display — single text container fills the screen */
-  private async createDisplay(): Promise<void> {
+  /** Detect if running on G2 glasses or in browser */
+  private async detectMode(): Promise<AppMode> {
+    try {
+      // Try to get the bridge with a short timeout
+      const bridge = await Promise.race([
+        waitForEvenAppBridge(),
+        new Promise<null>((_, reject) =>
+          setTimeout(() => reject(new Error('timeout')), 2000)
+        ),
+      ]);
+      if (bridge) {
+        this.bridge = bridge;
+        return 'glasses';
+      }
+    } catch {
+      // Bridge not available — browser mode
+    }
+    return 'browser';
+  }
+
+  // ─── Glasses Mode ───────────────────────────────────────────
+
+  private async initGlasses(): Promise<void> {
     const container = new TextContainerProperty({
       xPosition: 0,
       yPosition: 0,
@@ -70,20 +101,30 @@ export class LiveCaptionApp {
       containerTotalNum: 1,
       textObject: [container],
     });
-    await this.bridge.createStartUpPageContainer(startup);
-    console.log('[LiveCaption] Display created');
+    await this.bridge!.createStartUpPageContainer(startup);
+
+    // Input events
+    this.bridge!.onEvenHubEvent((event) => {
+      // Audio forwarding
+      if (event.audioEvent?.audioPcm && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(event.audioEvent.audioPcm);
+      }
+      // Double-tap to toggle
+      const eventType = event.textEvent?.eventType ?? event.sysEvent?.eventType;
+      if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+        this.toggleListening();
+      }
+    });
+
+    // Start mic
+    await this.bridge!.audioControl(true);
+    this.isListening = true;
+    this.setStatus('Listening...', true);
   }
 
-  /** Update the glasses display with current transcript */
-  private async updateDisplay(): Promise<void> {
-    const text = this.display.render();
-
-    // Skip update if nothing changed
-    if (text === this.lastRenderedText) return;
-    this.lastRenderedText = text;
-
+  private async updateGlassesDisplay(text: string): Promise<void> {
     try {
-      await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
+      await this.bridge!.textContainerUpgrade(new TextContainerUpgrade({
         containerID: this.containerId,
         containerName: this.containerName,
         contentOffset: 0,
@@ -91,17 +132,59 @@ export class LiveCaptionApp {
         content: text,
       }));
     } catch (err) {
-      console.error('[LiveCaption] Display update failed:', err);
+      console.error('[LiveCaption] Glasses display update failed:', err);
     }
   }
 
-  /** Connect to the backend WebSocket proxy */
+  // ─── Browser Mode ───────────────────────────────────────────
+
+  private initBrowser(): void {
+    // Set up display simulator
+    const simContainer = document.getElementById('glasses-sim');
+    if (simContainer) {
+      this.displaySim = new DisplaySimulator(simContainer, 1);
+      this.displaySim.startAnimation();
+    }
+
+    // Set up browser audio capture
+    this.browserAudio = new BrowserAudioCapture();
+    this.browserAudio.onData((pcm) => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(pcm);
+      }
+    });
+
+    this.setStatus('Ready — click Start to begin', false);
+  }
+
+  /** Start/stop browser audio capture (called from UI button) */
+  async toggleBrowserCapture(): Promise<void> {
+    if (!this.browserAudio) return;
+
+    if (this.browserAudio.isCapturing) {
+      await this.browserAudio.stop();
+      this.isListening = false;
+      this.display.addFinal(-1, '── Paused ──');
+      this.setStatus('Paused', false);
+    } else {
+      await this.browserAudio.start();
+      this.isListening = true;
+      this.display.addFinal(-1, '── Resumed ──');
+      this.setStatus('Listening...', true);
+    }
+    this.updateDisplay();
+  }
+
+  // ─── Shared Logic ───────────────────────────────────────────
+
   private connectWebSocket(): void {
     console.log(`[LiveCaption] Connecting to ${WS_URL}`);
+    this.setStatus('Connecting to server...', false);
     this.ws = new WebSocket(WS_URL);
 
     this.ws.onopen = () => {
       console.log('[LiveCaption] Server connected');
+      this.setStatus(this.isListening ? 'Listening...' : 'Connected — ready', true);
     };
 
     this.ws.onmessage = (event) => {
@@ -114,16 +197,16 @@ export class LiveCaptionApp {
     };
 
     this.ws.onclose = () => {
-      console.log('[LiveCaption] Server disconnected, reconnecting in 3s...');
+      console.log('[LiveCaption] Server disconnected');
+      this.setStatus('Disconnected — reconnecting...', false);
       this.scheduleReconnect();
     };
 
-    this.ws.onerror = (err) => {
-      console.error('[LiveCaption] WebSocket error:', err);
+    this.ws.onerror = () => {
+      this.setStatus('Connection error', false);
     };
   }
 
-  /** Handle incoming transcript messages from the server */
   private handleTranscript(msg: any): void {
     switch (msg.type) {
       case 'final':
@@ -139,56 +222,47 @@ export class LiveCaptionApp {
     this.updateDisplay();
   }
 
-  /** Start capturing audio from G2 mic and streaming to server */
-  private async startAudio(): Promise<void> {
-    // Register audio event handler BEFORE enabling mic
-    this.bridge.onEvenHubEvent((event) => {
-      if (event.audioEvent?.audioPcm && this.ws?.readyState === WebSocket.OPEN) {
-        // Forward raw PCM directly to the server
-        this.ws.send(event.audioEvent.audioPcm);
-      }
-    });
+  private updateDisplay(): void {
+    const text = this.display.render();
+    if (text === this.lastRenderedText) return;
+    this.lastRenderedText = text;
 
-    // Open the G2 microphone
-    await this.bridge.audioControl(true);
-    this.isListening = true;
-    console.log('[LiveCaption] Audio capture started');
-  }
-
-  /** Stop audio capture */
-  private async stopAudio(): Promise<void> {
-    await this.bridge.audioControl(false);
-    this.isListening = false;
-    console.log('[LiveCaption] Audio capture stopped');
-  }
-
-  /** Handle G2 input events (tap, double-tap, scroll) */
-  private handleEvent(event: any): void {
-    // Double-tap to toggle listening
-    const eventType = event.textEvent?.eventType ?? event.sysEvent?.eventType;
-    if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      this.toggleListening();
+    // Update glasses or simulator
+    if (this.mode === 'glasses') {
+      this.updateGlassesDisplay(text);
+    } else if (this.displaySim) {
+      this.displaySim.update(text);
     }
-    // Click to clear transcript
-    if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-      // Single tap — no-op for now, could cycle display modes
+
+    // Notify companion UI
+    if (this.onTranscriptUpdate) {
+      this.onTranscriptUpdate(text);
     }
   }
 
-  /** Toggle audio capture on/off */
   private async toggleListening(): Promise<void> {
-    if (this.isListening) {
-      await this.stopAudio();
-      this.display.addFinal(-1, '── Paused ──');
+    if (this.mode === 'glasses') {
+      if (this.isListening) {
+        await this.bridge!.audioControl(false);
+        this.isListening = false;
+        this.display.addFinal(-1, '── Paused ──');
+        this.setStatus('Paused', false);
+      } else {
+        this.display.addFinal(-1, '── Resumed ──');
+        await this.bridge!.audioControl(true);
+        this.isListening = true;
+        this.setStatus('Listening...', true);
+      }
       this.updateDisplay();
     } else {
-      this.display.addFinal(-1, '── Resumed ──');
-      await this.startAudio();
-      this.updateDisplay();
+      this.toggleBrowserCapture();
     }
   }
 
-  /** Reconnect with backoff */
+  private setStatus(text: string, connected: boolean): void {
+    if (this.onStatusChange) this.onStatusChange(text, connected);
+  }
+
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
@@ -197,10 +271,25 @@ export class LiveCaptionApp {
     }, 3000);
   }
 
-  /** Clean shutdown */
+  /** Clear transcript */
+  clearTranscript(): void {
+    this.display.clear();
+    this.lastRenderedText = '';
+    this.updateDisplay();
+  }
+
+  /** Get current speakers */
+  getSpeakers() {
+    return this.display.getSpeakers();
+  }
+
   async destroy(): Promise<void> {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    await this.stopAudio();
+    this.displaySim?.destroy();
+    await this.browserAudio?.stop();
+    if (this.mode === 'glasses') {
+      await this.bridge?.audioControl(false);
+    }
     this.ws?.close();
   }
 }
