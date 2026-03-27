@@ -100,6 +100,13 @@ wss.on('connection', (clientWs: WebSocket) => {
       const isFinal = data.is_final;
       const words = alt.words || [];
 
+      // Log speaker data from Deepgram for debugging
+      const speakerValues = words.map((w: any) => w.speaker);
+      const uniqueSpeakers = [...new Set(speakerValues.filter((s: any) => s !== undefined))];
+      if (isFinal) {
+        console.log(`📝 [${isFinal ? 'FINAL' : 'interim'}] speakers=${JSON.stringify(uniqueSpeakers)} text="${alt.transcript.substring(0, 60)}"`);
+      }
+
       // Determine primary speaker
       const speakerCounts = new Map<number, number>();
       for (const w of words) {
