@@ -43,6 +43,9 @@ export class TranscriptDisplay {
 
   /** Add a finalized transcript line */
   addFinal(speaker: number, text: string): void {
+    // Ensure speaker is registered
+    this.getLabel(speaker);
+
     // If last line is same speaker, append to it
     const lastLine = this.lines[this.lines.length - 1];
     if (lastLine && lastLine.speaker === speaker && lastLine.isFinal) {

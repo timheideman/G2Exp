@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #111;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #888;
+  }
+  .glasses-frame {
+    position: relative;
+    padding: 32px 60px;
+  }
+  /* Lens shape */
+  .lens {
+    position: relative;
+    width: 576px;
+    height: 288px;
+    background: #000;
+    border: 2px solid #1a1a1a;
+    border-radius: 24px;
+    overflow: hidden;
+    box-shadow:
+      0 0 40px rgba(0, 255, 0, 0.03),
+      inset 0 0 60px rgba(0, 0, 0, 0.5);
+  }
+  /* Simulate the micro-LED green glow */
+  .display {
+    position: absolute;
+    inset: 0;
+    padding: 12px 14px;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', 'Liberation Mono', monospace;
+    font-size: 14.5px;
+    line-height: 1.65;
+    color: #00cc44;
+    white-space: pre-wrap;
+    word-break: break-word;
+    text-shadow: 0 0 6px rgba(0, 204, 68, 0.4);
+    letter-spacing: 0.3px;
+  }
+  /* Dim text for older lines */
+  .dim { color: #006622; text-shadow: 0 0 4px rgba(0, 102, 34, 0.3); }
+  .mid { color: #009933; text-shadow: 0 0 5px rgba(0, 153, 51, 0.35); }
+  /* Bright for most recent */
+  .bright { color: #00ff55; text-shadow: 0 0 8px rgba(0, 255, 85, 0.5); }
+  /* Interim cursor blink */
+  .cursor { animation: blink 1s step-end infinite; }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+  .label {
+    margin-top: 16px;
+    font-size: 13px;
+    color: #444;
+    letter-spacing: 1px;
+  }
+  .badge {
+    display: inline-block;
+    background: #002200;
+    color: #00cc44;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-left: 8px;
+    letter-spacing: 0.5px;
+  }
+</style>
+</head>
+<body>
+  <div class="glasses-frame">
+    <div class="lens">
+      <div class="display">
+<span class="dim">[A] So the main thing we need to figure
+    out is the timeline for next week.</span>
+
+<span class="mid">[B] Right. I think if we start on Monday
+    we can have the first draft ready by
+    Wednesday at the latest.</span>
+
+<span class="mid">[A] That works. And the client meeting
+    is Thursday morning, correct?</span>
+
+<span class="bright">[B] Yeah, 10 AM. I'll send the invite
+    today. Do you want me to include
+    the design team as well?</span>
+
+<span class="bright">[A] Definitely, they should be in the
+    loop from the start. <span class="cursor">━</span></span></div>
+    </div>
+  </div>
+  <div class="label">EVEN REALITIES G2 <span class="badge">576 × 288</span> <span class="badge">LiveCaption v0.1</span></div>
+</body>
+</html>
