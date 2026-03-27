@@ -1,0 +1,14 @@
+{
+  "package_id": "dev.timheideman.livecaption",
+  "edition": "202603",
+  "name": "LiveCaption",
+  "version": "0.1.0",
+  "min_app_version": "0.1.0",
+  "tagline": "Real-time transcription with speaker diarization for the deaf",
+  "description": "Live speech-to-text captions displayed on your G2 glasses with speaker identification. Powered by Deepgram Nova-3.",
+  "author": "Tim Heideman",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": ["*"]
+  }
+}

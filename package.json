@@ -1,0 +1,29 @@
+{
+  "name": "g2-livecaption",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:client": "vite --host 0.0.0.0 --port 5173",
+    "dev:server": "tsx watch src/server/index.ts",
+    "build": "vite build",
+    "qr": "evenhub qr --http --port 5173",
+    "pack": "npm run build && evenhub pack app.json dist -o livecaption.ehpk"
+  },
+  "dependencies": {
+    "@deepgram/sdk": "^3.9.0",
+    "@evenrealities/even_hub_sdk": "latest",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@evenrealities/evenhub-cli": "latest",
+    "@evenrealities/evenhub-simulator": "latest",
+    "@types/ws": "^8.5.0",
+    "concurrently": "^9.1.0",
+    "dotenv": "^16.4.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.2.0"
+  }
+}
