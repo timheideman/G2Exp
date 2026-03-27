@@ -8,7 +8,7 @@
 
 export class DisplaySimulator {
   private canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
+  private ctx!: CanvasRenderingContext2D;
   private scale: number;
   private currentText = '';
   private animFrame: number | null = null;
@@ -32,11 +32,25 @@ export class DisplaySimulator {
 
     container.appendChild(this.canvas);
 
-    this.ctx = this.canvas.getContext('2d')!;
+    const ctx = this.canvas.getContext('2d');
+    if (!ctx) {
+      console.error('[DisplaySim] Failed to get 2d context');
+      return;
+    }
+    this.ctx = ctx;
     this.ctx.scale(scale, scale);
 
-    // Initial state
-    this.renderText('  LiveCaption\n\n  Connecting...');
+    // Draw a visible initial state to confirm canvas works
+    this.ctx.fillStyle = '#000000';
+    this.ctx.fillRect(0, 0, DisplaySimulator.WIDTH, DisplaySimulator.HEIGHT);
+    this.ctx.fillStyle = '#00cc44';
+    this.ctx.font = '16px monospace';
+    this.ctx.fillText('LiveCaption', 14, 30);
+    this.ctx.fillStyle = '#006622';
+    this.ctx.font = '14px monospace';
+    this.ctx.fillText('Waiting for connection...', 14, 60);
+
+    console.log('[DisplaySim] Canvas initialized');
   }
 
   /** Update the display with new text content */

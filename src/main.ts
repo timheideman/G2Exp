@@ -107,6 +107,36 @@ function initToggles(): void {
   }
 }
 
+// ─── Debug Panel ──────────────────────────────────────────────
+
+const debugEl = document.getElementById('debug');
+const debugLog = (msg: string) => {
+  const ts = new Date().toLocaleTimeString();
+  if (debugEl) {
+    debugEl.innerHTML += `<div><span style="color:#444">${ts}</span> ${msg}</div>`;
+    debugEl.scrollTop = debugEl.scrollHeight;
+  }
+  console.log(`[Debug] ${msg}`);
+};
+
+// Intercept console.log/error for BrowserAudio and LiveCaption messages
+const origLog = console.log;
+const origErr = console.error;
+console.log = (...args: any[]) => {
+  origLog.apply(console, args);
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  if (msg.includes('[BrowserAudio]') || msg.includes('[LiveCaption]') || msg.includes('[DisplaySim]')) {
+    debugLog(msg);
+  }
+};
+console.error = (...args: any[]) => {
+  origErr.apply(console, args);
+  const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+  debugLog(`<span style="color:#FF453A">❌ ${msg}</span>`);
+};
+
+debugLog('App starting...');
+
 // ─── Boot ─────────────────────────────────────────────────────
 
 buildLanguageGrid();
