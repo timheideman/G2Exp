@@ -29,7 +29,7 @@ export const LANGUAGES: LanguageOption[] = [
 ];
 
 export const DEFAULT_SETTINGS: LiveCaptionSettings = {
-  language: LANGUAGES[0], // Auto-detect
+  language: LANGUAGES[1], // Dutch
   smartFormat: true,
   profanityFilter: false,
   fontSize: 'medium',
