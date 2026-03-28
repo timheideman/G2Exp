@@ -168,4 +168,144 @@ describe('ContactStore', () => {
       expect(listener).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('setExpiry', () => {
+    it('sets expiry days on an existing contact', () => {
+      const contact = store.add('Sarah', makeEmbedding(1), 15000);
+      expect(contact.expiryDays).toBeNull();
+
+      const result = store.setExpiry(contact.id, 90);
+      expect(result).toBe(true);
+      expect(store.get(contact.id)?.expiryDays).toBe(90);
+    });
+
+    it('clears expiry when passed null', () => {
+      const contact = store.add('Sarah', makeEmbedding(1), 15000, 30);
+      expect(store.get(contact.id)?.expiryDays).toBe(30);
+
+      store.setExpiry(contact.id, null);
+      expect(store.get(contact.id)?.expiryDays).toBeNull();
+    });
+
+    it('returns false for unknown contact ID', () => {
+      const result = store.setExpiry('nonexistent-id', 30);
+      expect(result).toBe(false);
+    });
+
+    it('notifies listeners when expiry is changed', () => {
+      const listener = vi.fn();
+      const contact = store.add('Sarah', makeEmbedding(1), 15000);
+      store.onChange(listener);
+
+      store.setExpiry(contact.id, 60);
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('getExpiryInfo', () => {
+    it('returns null for unknown contact ID', () => {
+      expect(store.getExpiryInfo('nonexistent-id')).toBeNull();
+    });
+
+    it('returns null expiresAt and daysRemaining for contacts with no expiry', () => {
+      const contact = store.add('Sarah', makeEmbedding(1), 15000); // no expiry
+      const info = store.getExpiryInfo(contact.id);
+      expect(info).not.toBeNull();
+      expect(info?.expiresAt).toBeNull();
+      expect(info?.daysRemaining).toBeNull();
+    });
+
+    it('returns future expiry date for a fresh contact', () => {
+      const contact = store.add('Sarah', makeEmbedding(1), 15000, 30);
+      const info = store.getExpiryInfo(contact.id);
+      expect(info?.expiresAt).toBeInstanceOf(Date);
+      expect(info?.daysRemaining).toBeGreaterThan(0);
+      expect(info?.daysRemaining).toBeLessThanOrEqual(30);
+    });
+
+    it('returns negative daysRemaining for an expired contact', () => {
+      const contact = store.add('Old', makeEmbedding(1), 15000, 30);
+      // Manually back-date createdAt to 60 days ago
+      const c = store.get(contact.id)!;
+      c.createdAt = Date.now() - 60 * 24 * 60 * 60 * 1000;
+
+      const info = store.getExpiryInfo(contact.id);
+      expect(info?.daysRemaining).toBeLessThan(0);
+    });
+
+    it('uses lastMatchedAt as activity baseline when set', () => {
+      const contact = store.add('Active', makeEmbedding(1), 15000, 30);
+      // Back-date creation but set a recent match
+      const c = store.get(contact.id)!;
+      c.createdAt = Date.now() - 60 * 24 * 60 * 60 * 1000;
+      c.lastMatchedAt = Date.now(); // matched just now
+
+      const info = store.getExpiryInfo(contact.id);
+      expect(info?.daysRemaining).toBeGreaterThan(0); // Not expired yet
+    });
+  });
+
+  describe('importFromFile', () => {
+    it('imports contacts from a valid JSON File', async () => {
+      store.add('Sarah', makeEmbedding(1), 15000);
+      const exported = store.export();
+
+      localStorageMock.clear();
+      const store2 = new ContactStore();
+      const blob = new Blob([JSON.stringify(exported)], { type: 'application/json' });
+      const file = new File([blob], 'export.json', { type: 'application/json' });
+
+      const result = await store2.importFromFile(file);
+      expect(result.imported).toBe(1);
+      expect(result.skipped).toBe(0);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('skips duplicate contacts', async () => {
+      store.add('Sarah', makeEmbedding(1), 15000);
+      const exported = store.export();
+
+      // Import into the same store (already has Sarah)
+      const blob = new Blob([JSON.stringify(exported)], { type: 'application/json' });
+      const file = new File([blob], 'export.json', { type: 'application/json' });
+
+      const result = await store.importFromFile(file);
+      expect(result.imported).toBe(0);
+      expect(result.skipped).toBe(1);
+    });
+
+    it('returns error for invalid JSON', async () => {
+      const blob = new Blob(['not valid json{{{'], { type: 'application/json' });
+      const file = new File([blob], 'bad.json', { type: 'application/json' });
+
+      const result = await store.importFromFile(file);
+      expect(result.imported).toBe(0);
+      expect(result.error).toBeTruthy();
+    });
+
+    it('returns error when contacts array is missing', async () => {
+      const bad = JSON.stringify({ version: '1.0.0', exportedAt: new Date().toISOString() });
+      const blob = new Blob([bad], { type: 'application/json' });
+      const file = new File([blob], 'bad.json', { type: 'application/json' });
+
+      const result = await store.importFromFile(file);
+      expect(result.imported).toBe(0);
+      expect(result.error).toMatch(/contacts/);
+    });
+  });
+
+  describe('auto-prune on construction', () => {
+    it('prunes expired contacts when a new store is instantiated', () => {
+      // Add a contact with a 30-day expiry, back-dated 60 days
+      const contact = store.add('OldContact', makeEmbedding(1), 15000, 30);
+      const c = store.get(contact.id)!;
+      c.createdAt = Date.now() - 60 * 24 * 60 * 60 * 1000;
+      // Manually persist the back-dated state
+      (store as unknown as { save(): void }).save();
+
+      // Load a fresh instance — should auto-prune
+      const store2 = new ContactStore();
+      expect(store2.size).toBe(0);
+    });
+  });
 });

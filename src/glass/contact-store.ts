@@ -22,6 +22,7 @@ export class ContactStore {
 
   constructor() {
     this.load();
+    this.pruneExpired();
   }
 
   /** Register change listener */
@@ -135,6 +136,34 @@ export class ContactStore {
     return pruned;
   }
 
+  /** Update a contact's expiry in days (null = never expire). Returns false if contact not found. */
+  setExpiry(contactId: string, days: number | null): boolean {
+    const contact = this.contacts.get(contactId);
+    if (!contact) return false;
+    contact.expiryDays = days;
+    this.save();
+    this.notify();
+    return true;
+  }
+
+  /**
+   * Get expiry info for a contact.
+   * Returns null if the contact doesn't exist.
+   * Returns { expiresAt: null, daysRemaining: null } if the contact has no expiry set.
+   */
+  getExpiryInfo(contactId: string): { expiresAt: Date | null; daysRemaining: number | null } | null {
+    const contact = this.contacts.get(contactId);
+    if (!contact) return null;
+    if (contact.expiryDays === null) {
+      return { expiresAt: null, daysRemaining: null };
+    }
+    const lastActivity = contact.lastMatchedAt ?? contact.createdAt;
+    const expiryMs = contact.expiryDays * 24 * 60 * 60 * 1000;
+    const expiresAt = new Date(lastActivity + expiryMs);
+    const daysRemaining = Math.ceil((expiresAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+    return { expiresAt, daysRemaining };
+  }
+
   // ─── GDPR ──────────────────────────────────────────────────
 
   /** Export all voiceprints in portable format */
@@ -151,6 +180,40 @@ export class ContactStore {
         embedding: c.embedding,
       })),
     };
+  }
+
+  /**
+   * Import voiceprints from a File object (e.g. from a file input).
+   * Reads the file as text, parses JSON, validates the shape, then calls import().
+   */
+  async importFromFile(file: File): Promise<{ imported: number; skipped: number; error?: string }> {
+    let text: string;
+    try {
+      text = await file.text();
+    } catch (e) {
+      return { imported: 0, skipped: 0, error: `Failed to read file: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return { imported: 0, skipped: 0, error: 'Invalid JSON — file could not be parsed.' };
+    }
+
+    if (
+      typeof data !== 'object' ||
+      data === null ||
+      !Array.isArray((data as Record<string, unknown>).contacts)
+    ) {
+      return { imported: 0, skipped: 0, error: 'Invalid format — expected an object with a "contacts" array.' };
+    }
+
+    const exportData = data as VoiceprintExport;
+    const totalContacts = exportData.contacts.length;
+    const imported = this.import(exportData);
+    const skipped = totalContacts - imported;
+    return { imported, skipped };
   }
 
   /** Import voiceprints from export (merges, doesn't overwrite) */
