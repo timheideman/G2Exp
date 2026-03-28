@@ -327,7 +327,7 @@ wss.on('connection', (clientWs: WebSocket) => {
       smart_format: cfg.smartFormat,
       diarize: true,
       interim_results: true,
-      utterance_end_ms: 2000,
+      utterance_end_ms: 1000,  // was 2000 — finalise segments faster in conversation
       vad_events: true,
       profanity_filter: cfg.profanityFilter,
       encoding: 'linear16',
@@ -335,7 +335,7 @@ wss.on('connection', (clientWs: WebSocket) => {
       channels: 1,
       multichannel: false,
       no_delay: true,
-      endpointing: 300,
+      endpointing: 150,        // was 300 — detect speaker transitions faster
     });
 
     dgConnection.on(LiveTranscriptionEvents.Open, () => {
