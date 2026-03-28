@@ -4,50 +4,27 @@
 
 ## 🔴 Must Have (MVP)
 
-### Enrollment Flow
-- [ ] Build "Add Contact" UI: record button → 15s voice sample → generate embedding → save to ContactStore
-- [ ] Wire real embedding provider (resemblyzer or lightweight ONNX) to replace MockEmbeddingProvider
-- [ ] Audio buffer capture during enrollment (reuse BrowserAudioCapture, accumulate PCM chunks)
-
-### Speaker Matching Pipeline
-- [ ] Integrate SpeakerMatcher into `src/server/index.ts` — feed per-speaker audio segments from Deepgram
-- [ ] Emit identity updates to client via WebSocket (speaker index → contact name)
-- [ ] Update SessionLabels automatically when match is found
-- [ ] Handle speaker re-identification when Deepgram reassigns speaker indices mid-session
-
-### Quick Enroll from Session
-- [ ] "Save Speaker B as contact?" button in speakers panel
-- [ ] Buffer recent audio per speaker during session for retroactive enrollment
+### Wiring (built but not fully connected in app.ts)
+- [ ] Wire `ReconnectScheduler` into `src/glass/app.ts` to replace the existing simple reconnect logic
+- [ ] Wire `DisplaySimulator.setFontSize()` and `TranscriptDisplay.setPaused()` into `app.ts` settings change handler
+- [ ] Wire `applyServerIdentification()` — handle `speaker_identified` WS message in `app.ts` → call `SessionLabels.applyServerIdentification()`
+- [ ] Wire `loadVoiceprintsOnServer()` — send ContactStore voiceprints to server on connect (when in Contacts mode)
+- [ ] Update WS URL in `src/main.ts` for production: use `wss://…/ws` when on HTTPS (required for VPS deploy — see DEPLOY_PLAN.md Step 2)
 
 ## 🟡 Should Have
 
-### Display & UX
-- [ ] Test word-wrapping fix on actual G2 display (font metrics may differ in WebView)
-- [ ] Font size setting (small/medium/large) not yet wired to display renderer
-- [ ] Pause indicator on glasses display (currently only companion UI shows pause state)
-
-### Robustness
-- [ ] Auto-reconnect WebSocket on disconnect (server → client)
-- [ ] Handle Deepgram API key expiry / quota exceeded gracefully
-- [ ] Rate-limit voiceprint matching (don't re-match same speaker every utterance)
-
-### Settings Sync
-- [ ] Persist idMode to localStorage alongside other settings
-- [ ] Send idMode to server so it knows whether to run matching pipeline
-
-## 🟢 Nice to Have
-
-### Privacy & GDPR
-- [ ] Import contacts from JSON file (UI button + file picker)
-- [ ] Voiceprint expiry UI (set per-contact auto-delete after X months)
+### UI Polish
+- [ ] Wire import-from-JSON button in companion UI (ContactStore has `importFromFile()` — just needs a file picker + button in `index.html`)
+- [ ] Wire voiceprint expiry UI (ContactStore has `setExpiry()` / `getExpiryInfo()` — needs per-contact UI in `index.html`)
 - [ ] "Privacy mode" quick toggle on glasses (double-tap to switch Anonymous ↔ Contacts)
 
-### Production Readiness
-- [ ] Remove debug panel (or hide behind flag)
-- [ ] CI pipeline (GitHub Actions: lint + test on push)
-- [ ] Even Hub simulator testing
-- [ ] Test on physical G2 glasses
+### Hardware Testing
+- [ ] Test word-wrapping on actual G2 display (font metrics may differ in WebView vs. simulator)
+- [ ] Test full app on physical G2 glasses
 - [ ] Performance profiling: audio latency end-to-end (mic → glasses display)
+- [ ] Even Hub simulator testing
+
+## 🟢 Nice to Have
 
 ### Future Features
 - [ ] Multi-language auto-detect (let Deepgram pick language instead of manual selection)
@@ -64,7 +41,24 @@
 - [x] Word-wrapping on display simulator
 - [x] Privacy-first architecture (ContactStore, SessionLabels, mode toggle)
 - [x] GDPR export/delete for voiceprints
-- [x] 84 tests passing across 8 test files
 - [x] Debug panel with console interceptors
 - [x] Settings: 13 languages, smart formatting, profanity filter
 - [x] Contacts mode as default
+- [x] **Enrollment flow** — "Add Contact" modal, 15s recording, countdown progress bar
+- [x] **Real embedding provider** — MFCC-based (512-pt FFT, 40 mel filters, 192-dim L2 embedding)
+- [x] **Server speaker matching pipeline** — SpeakerMatcher wired into server, rate-limited, speaker_identified messages
+- [x] **Per-speaker 30s audio ring buffer** — retroactive enrollment via enroll_from_buffer
+- [x] **"Save as Contact" from session** — 💾 button next to each speaker in panel
+- [x] **Font size setting** — setFontSize() on DisplaySimulator (small/medium/large)
+- [x] **Pause indicator on glasses display** — ⏸ overlay in top-right corner
+- [x] **Client WebSocket auto-reconnect** — ReconnectScheduler with exponential backoff
+- [x] **Deepgram error handling** — user-friendly messages for quota/key expiry errors
+- [x] **idMode persistence** — saved to localStorage, sent in config messages
+- [x] **SessionLabels.applyServerIdentification()** — bridge from server match → display
+- [x] **GitHub Actions CI** — lint + test on push/PR to main and dev
+- [x] **Debug panel flag** — isDebugEnabled() (localStorage or ?debug=true)
+- [x] **ContactStore.importFromFile()** — File API, validates JSON, merges contacts
+- [x] **Auto-prune expired voiceprints** — runs on ContactStore construction
+- [x] **ContactStore.setExpiry() / getExpiryInfo()** — per-contact expiry management
+- [x] 146 tests passing across 10 test files
+- [x] VPS deployment plan written (DEPLOY_PLAN.md)
