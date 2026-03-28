@@ -395,7 +395,17 @@ function updateSpeakersPanel(): void {
   const speakers = app.getSpeakers();
 
   if (speakers.length === 0) return;
-  if (panel) panel.style.display = '';
+  if (panel) {
+    const wasHidden = panel.style.display === 'none' || panel.style.display === '';
+    panel.style.display = 'block';
+    // Auto-open the panel the first time speakers appear
+    const body = document.getElementById('speakers-body');
+    const toggle = document.getElementById('speakers-toggle');
+    if (wasHidden && body && !body.classList.contains('open')) {
+      body.classList.add('open');
+      toggle?.classList.add('open');
+    }
+  }
 
   if (!listEl) return;
 
@@ -403,25 +413,38 @@ function updateSpeakersPanel(): void {
     const labels = sessionLabels.getAllLabels();
     const labelInfo = labels.find(l => l.speakerIndex === s.index);
     const displayName = sessionLabels.getDisplayName(s.index);
-    const typeLabel = labelInfo?.type === 'identified' ? '✅ identified'
-      : labelInfo?.type === 'labeled' ? '✏️ labeled'
-      : '';
+    const isIdentified = labelInfo?.type === 'identified';
+    const isLabeled = labelInfo?.type === 'labeled';
+    const statusBadge = isIdentified
+      ? `<span style="font-size:11px;color:#4BB956;">✅ recognized</span>`
+      : isLabeled
+      ? `<span style="font-size:11px;color:#f5a623;">✏️ this session only</span>`
+      : `<span style="font-size:11px;color:#555;">unknown</span>`;
 
     return `
-      <div class="speaker-item">
-        <div style="display:flex;align-items:center;gap:4px;">
+      <div class="speaker-item" style="flex-direction:column;align-items:flex-start;gap:6px;padding:10px 0;">
+        <div style="display:flex;align-items:center;gap:6px;width:100%;">
           <span class="speaker-tag">${s.letter}</span>
           <input class="speaker-name-input" data-speaker="${s.index}"
             value="${labelInfo ? labelInfo.name : ''}"
-            placeholder="${displayName}" />
-          <span class="speaker-type">${typeLabel}</span>
-          <button class="btn-save-speaker" data-save-speaker="${s.index}"
+            placeholder="Name this speaker…" style="flex:1;" />
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;width:100%;padding-left:34px;">
+          ${statusBadge}
+          ${!isIdentified ? `
+          <button class="btn btn-save-speaker" data-save-speaker="${s.index}"
             data-speaker-label="${labelInfo?.name || displayName}"
-            title="Save as contact using session audio">💾</button>
+            style="font-size:12px;padding:4px 10px;"
+            title="Register this voice so it's recognized in future sessions">
+            💾 Save voice
+          </button>` : ''}
         </div>
       </div>
     `;
-  }).join('');
+  }).join('') + `<div style="font-size:11px;color:#444;margin-top:8px;line-height:1.5;border-top:1px solid #1a1a1a;padding-top:8px;">
+    Labels are <strong style="color:#666">session-only</strong> — they reset on refresh.<br>
+    Hit <strong style="color:#666">💾 Save voice</strong> to register a voice fingerprint that persists across sessions.
+  </div>`;
 
   // Wire up name inputs for session labeling
   listEl.querySelectorAll('.speaker-name-input').forEach(input => {
