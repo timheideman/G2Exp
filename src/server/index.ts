@@ -174,6 +174,9 @@ wss.on('connection', (clientWs: WebSocket) => {
 
   // ── Global audio ring buffer (for time-range extraction) ────
   const globalRing = createRingBuffer(GLOBAL_RING_BYTES);
+  // Tracks how many bytes were already in the ring when Deepgram first opened.
+  // Deepgram timestamps are relative to the first byte IT received, not ring byte 0.
+  let ringBytesAtDgOpen = 0;
 
   // ── Per-speaker ring buffers (30s each) ─────────────────────
   const speakerRings = new Map<number, RingBuffer>();
@@ -341,6 +344,8 @@ wss.on('connection', (clientWs: WebSocket) => {
     dgConnection.on(LiveTranscriptionEvents.Open, () => {
       console.log(`✅ Deepgram ready (lang=${cfg.language})`);
       isDeepgramOpen = true;
+      ringBytesAtDgOpen = globalRing.totalBytesWritten;
+      console.log(`📍 Ring offset at Deepgram open: ${ringBytesAtDgOpen} bytes (${(ringBytesAtDgOpen / BYTES_PER_SEC).toFixed(2)}s)`);
       startKeepalive();
 
       if (clientWs.readyState === WebSocket.OPEN) {
@@ -431,12 +436,16 @@ wss.on('connection', (clientWs: WebSocket) => {
 
   /** Extract per-speaker PCM chunks from global ring buffer and feed to matching */
   function runSpeakerMatchingPipeline(words: any[]): void {
+    const ringOffsetSec = ringBytesAtDgOpen / BYTES_PER_SEC;
+
     // Group word time ranges by speaker index
+    // Deepgram timestamps are relative to first audio byte Deepgram received.
+    // Adjust by ringOffsetSec to map into the global ring buffer.
     const speakerRanges = new Map<number, Array<{ start: number; end: number }>>();
     for (const w of words) {
       const s: number = w.speaker ?? 0;
-      const start: number = w.start ?? 0;
-      const end: number = w.end ?? 0;
+      const start: number = (w.start ?? 0) + ringOffsetSec;
+      const end: number   = (w.end   ?? 0) + ringOffsetSec;
       if (end > start) {
         if (!speakerRanges.has(s)) speakerRanges.set(s, []);
         speakerRanges.get(s)!.push({ start, end });
@@ -445,29 +454,33 @@ wss.on('connection', (clientWs: WebSocket) => {
 
     for (const [speakerIndex, ranges] of speakerRanges) {
       const tracker = getSpeakerTracker(speakerIndex);
-      if (tracker.identified) continue; // Already matched
+      if (tracker.identified) continue;
 
       const sinceLastAttempt = Date.now() - tracker.lastAttemptMs;
       if (tracker.lastAttemptMs > 0 && sinceLastAttempt < MATCH_RETRY_MS) continue;
 
-      // Extract and feed each word's audio
       const speakerRing = getSpeakerRing(speakerIndex);
+      let extractedMs = 0;
+      let nullCount = 0;
 
       for (const range of ranges) {
         const audio = extractTimeRange(globalRing, range.start, range.end);
-        if (!audio || audio.length < 2) continue;
+        if (!audio || audio.length < 2) { nullCount++; continue; }
 
         const durationMs = (range.end - range.start) * 1000;
-
-        // Write to per-speaker ring buffer (for enroll_from_buffer)
+        extractedMs += durationMs;
         writeRingBuffer(speakerRing, audio);
-
-        // Feed to tracker for matching
         tracker.audioChunks.push(audio);
         tracker.totalAudioMs += durationMs;
       }
 
-      // Attempt identification if we have enough audio
+      if (nullCount > 0) {
+        console.log(`⚠️  Speaker ${speakerIndex}: ${nullCount}/${ranges.length} word ranges returned null (ring=${globalRing.totalBytesWritten}B, offset=${ringBytesAtDgOpen}B)`);
+      }
+      if (extractedMs > 0) {
+        console.log(`🎙 Speaker ${speakerIndex}: +${extractedMs.toFixed(0)}ms audio, total=${tracker.totalAudioMs.toFixed(0)}ms / ${MIN_AUDIO_MS}ms needed`);
+      }
+
       if (tracker.totalAudioMs >= MIN_AUDIO_MS) {
         attemptSpeakerMatch(speakerIndex, tracker);
       }
