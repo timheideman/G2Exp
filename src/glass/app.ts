@@ -16,11 +16,19 @@ import { TranscriptDisplay } from './transcript-display';
 import { BrowserAudioCapture } from './browser-audio';
 import { DisplaySimulator } from './display-simulator';
 import { SettingsManager } from './settings-manager';
+import { ReconnectScheduler } from './settings-manager';
 import type { LiveCaptionSettings, ConfigMessage } from '../types/settings';
 
-// Server URL — configurable via window global or defaults to same host
-const WS_URL = (window as any).__LIVECAPTION_WS_URL__
-  || `ws://${window.location.hostname}:8080`;
+// Server URL — configurable via window global or auto-detected from current page
+// Dev  (HTTP):  ws://localhost:8080
+// Prod (HTTPS): wss://livecaption.astralate.com/ws
+function resolveWsUrl(): string {
+  if ((window as any).__LIVECAPTION_WS_URL__) return (window as any).__LIVECAPTION_WS_URL__;
+  const isSecure = window.location.protocol === 'https:';
+  if (isSecure) return `wss://${window.location.hostname}/ws`;
+  return `ws://${window.location.hostname}:8080`;
+}
+const WS_URL = resolveWsUrl();
 
 type AppMode = 'glasses' | 'browser';
 
@@ -35,7 +43,7 @@ export class LiveCaptionApp {
   private mode: AppMode = 'browser';
   private containerId = 1;
   private containerName = 'caption';
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectScheduler = new ReconnectScheduler();
   private lastRenderedText = '';
 
   readonly settings = new SettingsManager();
@@ -84,6 +92,8 @@ export class LiveCaptionApp {
   private onSettingsChanged(settings: LiveCaptionSettings): void {
     // Send config update to server
     this.sendConfig(settings);
+    // Apply display settings immediately
+    this.displaySim?.setFontSize(settings.fontSize);
   }
 
   private sendConfig(settings: LiveCaptionSettings): void {
@@ -184,12 +194,16 @@ export class LiveCaptionApp {
       await this.browserAudio.stop();
       this.isListening = false;
       this.display.addFinal(-1, '── Paused ──');
+      this.display.setPaused(true);
+      this.displaySim?.setPaused(true);
       this.setStatus('Paused', false);
     } else {
       this.setStatus('Requesting mic access...', false);
       try {
         await this.browserAudio.start();
         this.isListening = true;
+        this.display.setPaused(false);
+        this.displaySim?.setPaused(false);
         this.setStatus('Listening (mic active)...', true);
       } catch (err: any) {
         console.error('[LiveCaption] Mic error:', err);
@@ -209,8 +223,11 @@ export class LiveCaptionApp {
 
     this.ws.onopen = () => {
       console.log('[LiveCaption] Server connected');
+      this.reconnectScheduler.reset();
       // Send current settings on connect
       this.sendConfig(this.settings.current);
+      // Apply current font size to display
+      this.displaySim?.setFontSize(this.settings.current.fontSize);
       this.setStatus(this.isListening ? 'Listening...' : 'Connected — ready', true);
     };
 
@@ -234,7 +251,7 @@ export class LiveCaptionApp {
     this.ws.onclose = () => {
       console.log('[LiveCaption] Server disconnected');
       this.setStatus('Disconnected — reconnecting...', false);
-      this.scheduleReconnect();
+      this.reconnectScheduler.schedule(() => this.connectWebSocket());
     };
 
     this.ws.onerror = () => {
@@ -296,13 +313,7 @@ export class LiveCaptionApp {
     if (this.onStatusChange) this.onStatusChange(text, connected);
   }
 
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.connectWebSocket();
-    }, 3000);
-  }
+
 
   clearTranscript(): void {
     this.display.clear();
@@ -315,7 +326,7 @@ export class LiveCaptionApp {
   }
 
   async destroy(): Promise<void> {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectScheduler.cancel();
     this.displaySim?.destroy();
     await this.browserAudio?.stop();
     if (this.mode === 'glasses') {

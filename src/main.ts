@@ -32,8 +32,14 @@ app.onStatusChange = (text: string, connected: boolean) => {
     statusEl.className = `status ${connected ? 'connected' : ''}`;
   }
   // Re-wrap WS onmessage on every connect (handles reconnects too)
+  // Also re-sync voiceprints if we're in contacts mode
   if (connected) {
-    setTimeout(rewrapWsOnMessage, 0);
+    setTimeout(() => {
+      rewrapWsOnMessage();
+      if (app.settings.current.idMode === 'contacts') {
+        loadVoiceprintsOnServer();
+      }
+    }, 0);
   }
 };
 
@@ -198,7 +204,7 @@ function handleSpeakerIdentified(msg: {
   voiceprintId: string | null;
   confidence: number;
 }): void {
-  sessionLabels.setLabel(msg.speakerIndex, msg.name);
+  sessionLabels.applyServerIdentification(msg.speakerIndex, msg.name, msg.voiceprintId);
   debugLog(`✅ Identified speaker ${msg.speakerIndex} as "${msg.name}" (${(msg.confidence * 100).toFixed(1)}%)`);
   updateSpeakersPanel();
 }
