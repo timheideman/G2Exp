@@ -193,6 +193,63 @@
       background: #1a1a1a; border: 1px solid #333;
       border-radius: 3px; padding: 1px 5px; font-size: 11px; color: #888;
     }
+
+    /* Save-as-contact icon on speaker rows */
+    .btn-save-speaker {
+      background: none; border: none; color: #555; cursor: pointer;
+      font-size: 15px; padding: 2px 6px; border-radius: 4px;
+      transition: color 0.15s, background 0.15s; margin-left: 4px;
+    }
+    .btn-save-speaker:hover { color: #4BB956; background: #0d2818; }
+
+    /* ── Enrollment Modal ── */
+    .modal-backdrop {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7); z-index: 100;
+      align-items: center; justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: #111; border: 1px solid #2a2a2a; border-radius: 12px;
+      padding: 24px; width: 340px; max-width: 92vw; position: relative;
+    }
+    .modal h2 { font-size: 16px; font-weight: 500; color: #ddd; margin-bottom: 16px; }
+    .modal-close {
+      position: absolute; top: 14px; right: 16px;
+      background: none; border: none; color: #555; cursor: pointer;
+      font-size: 18px; line-height: 1;
+    }
+    .modal-close:hover { color: #ccc; }
+    .modal label { display: block; font-size: 12px; color: #666; margin-bottom: 6px;
+      text-transform: uppercase; letter-spacing: 0.5px; }
+    .modal input[type="text"] {
+      width: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 6px;
+      color: #ddd; padding: 9px 12px; font-size: 14px; outline: none; margin-bottom: 14px;
+    }
+    .modal input[type="text"]:focus { border-color: #4BB956; }
+
+    /* Progress bar */
+    .enroll-progress { display: none; margin-bottom: 14px; }
+    .enroll-progress.visible { display: block; }
+    .progress-track {
+      height: 6px; background: #1a1a1a; border-radius: 3px; overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; background: #4BB956; border-radius: 3px;
+      width: 0%; transition: width 0.25s linear;
+    }
+    .progress-label {
+      font-size: 11px; color: #555; margin-top: 4px; text-align: right;
+    }
+
+    .enroll-status {
+      font-size: 13px; color: #888; min-height: 20px; margin-bottom: 14px;
+    }
+    .enroll-status.ok  { color: #4BB956; }
+    .enroll-status.err { color: #FF453A; }
+
+    .modal-actions { display: flex; gap: 8px; }
+    .modal-actions .btn { flex: 1; padding: 9px 16px; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -285,6 +342,7 @@
         <div style="font-size:13px;color:#555;">No contacts saved yet.</div>
       </div>
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+        <button class="btn" id="btn-add-contact" style="font-size:12px;padding:6px 14px;">➕ Add Contact</button>
         <button class="btn" id="btn-export" style="font-size:12px;padding:6px 14px;">📤 Export All</button>
         <button class="btn" id="btn-delete-all" style="font-size:12px;padding:6px 14px;color:#FF453A;border-color:#3a1a1a;">🗑️ Delete All</button>
       </div>
@@ -305,6 +363,40 @@
     Click <kbd>Start Listening</kbd> to capture from your microphone.<br>
     On G2 glasses: double-tap to pause/resume, scroll to review history.<br>
     Requires the WebSocket server running on port 8080.
+  </div>
+
+  <!-- ── Add Contact Modal ── -->
+  <div class="modal-backdrop" id="enroll-modal-backdrop">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="enroll-modal-title">
+      <button class="modal-close" id="enroll-modal-close" aria-label="Close">✕</button>
+      <h2 id="enroll-modal-title">🎙️ Add Contact</h2>
+
+      <label for="enroll-name-input">Contact Name</label>
+      <input
+        type="text"
+        id="enroll-name-input"
+        placeholder="e.g. Sarah, Tim…"
+        autocomplete="off"
+        maxlength="64"
+      />
+
+      <!-- Progress bar (shown while recording) -->
+      <div class="enroll-progress" id="enroll-progress">
+        <div class="progress-track">
+          <div class="progress-fill" id="enroll-progress-fill"></div>
+        </div>
+        <div class="progress-label" id="enroll-progress-label">0 / 15s</div>
+      </div>
+
+      <!-- Status messages -->
+      <div class="enroll-status" id="enroll-status"></div>
+
+      <!-- Action buttons -->
+      <div class="modal-actions">
+        <button class="btn" id="enroll-btn-start">🎙 Start Recording</button>
+        <button class="btn" id="enroll-btn-stop" style="display:none;">⏹ Stop</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/src/main.ts"></script>

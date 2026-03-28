@@ -2,13 +2,14 @@
  * LiveCaption — Entry Point
  *
  * Bootstraps the app, wires up the companion UI,
- * and initializes the settings panel.
+ * initializes the settings panel, and sets up enrollment.
  */
 
 import { LiveCaptionApp } from './glass/app';
 import { LANGUAGES } from './types/settings';
 import { ContactStore } from './glass/contact-store';
 import { SessionLabels } from './glass/session-labels';
+import { EnrollmentRecorder } from './glass/enrollment-recorder';
 import type { IdentificationMode } from './types/privacy';
 
 const app = new LiveCaptionApp();
@@ -29,6 +30,10 @@ app.onStatusChange = (text: string, connected: boolean) => {
   if (statusEl) {
     statusEl.textContent = text;
     statusEl.className = `status ${connected ? 'connected' : ''}`;
+  }
+  // Re-wrap WS onmessage on every connect (handles reconnects too)
+  if (connected) {
+    setTimeout(rewrapWsOnMessage, 0);
   }
 };
 
@@ -58,13 +63,11 @@ btnClear?.addEventListener('click', () => {
 
 // ─── Settings Panel ───────────────────────────────────────────
 
-// Toggle settings visibility
 settingsToggle?.addEventListener('click', () => {
   const isOpen = settingsBody?.classList.toggle('open');
   settingsToggle.classList.toggle('open', isOpen);
 });
 
-// Build language grid
 function buildLanguageGrid(): void {
   if (!langGrid) return;
   const currentLang = app.settings.current.language.code;
@@ -76,7 +79,6 @@ function buildLanguageGrid(): void {
     el.innerHTML = `<span class="flag">${lang.flag}</span><span class="name">${lang.label}</span>`;
     el.addEventListener('click', () => {
       app.settings.setLanguage(lang.code);
-      // Update UI selection
       langGrid.querySelectorAll('.lang-option').forEach(o => o.classList.remove('selected'));
       el.classList.add('selected');
     });
@@ -84,7 +86,6 @@ function buildLanguageGrid(): void {
   }
 }
 
-// Initialize toggles
 function initToggles(): void {
   const settings = app.settings.current;
 
@@ -122,11 +123,9 @@ const debugLog = (msg: string) => {
     debugEl.innerHTML += `<div><span style="color:#444">${ts}</span> ${msg}</div>`;
     debugEl.scrollTop = debugEl.scrollHeight;
   }
-  // Use origLog directly to avoid infinite recursion
   origLog(`[Debug] ${msg}`);
 };
 
-// Intercept console.log/error for BrowserAudio and LiveCaption messages
 console.log = (...args: any[]) => {
   origLog.apply(console, args);
   const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
@@ -146,9 +145,63 @@ debugLog('App starting...');
 
 const contactStore = new ContactStore();
 const sessionLabels = new SessionLabels();
+const enrollmentRecorder = new EnrollmentRecorder(contactStore);
 
 // Wire session labels into transcript display
 app.display.setNameResolver((speakerIndex) => sessionLabels.getShortTag(speakerIndex));
+
+// ─── WebSocket interception ───────────────────────────────────
+
+/**
+ * Wrap the app's WebSocket onmessage to intercept enrollment and
+ * speaker_identified messages before the app's handler sees them.
+ * Called after each connection (and reconnection).
+ */
+function rewrapWsOnMessage(): void {
+  const ws = (app as any).ws as WebSocket | null;
+  if (!ws) return;
+  if ((ws as any).__enrollWrapped) return; // Already wrapped this instance
+
+  const origOnMessage = ws.onmessage;
+  ws.onmessage = (event: MessageEvent) => {
+    try {
+      const msg = JSON.parse(event.data as string);
+
+      // 1. Enrollment messages
+      if (enrollmentRecorder.handleServerMessage(msg)) {
+        return; // Consumed
+      }
+
+      // 2. Speaker identification from server matching pipeline
+      if (msg.type === 'speaker_identified') {
+        handleSpeakerIdentified(msg);
+        return;
+      }
+    } catch {
+      // Binary or non-JSON — pass through
+    }
+    origOnMessage?.call(ws, event);
+  };
+
+  (ws as any).__enrollWrapped = true;
+  enrollmentRecorder.setSendFn((data) => {
+    const currentWs = (app as any).ws as WebSocket | null;
+    if (currentWs?.readyState === WebSocket.OPEN) {
+      currentWs.send(data as any);
+    }
+  });
+}
+
+function handleSpeakerIdentified(msg: {
+  speakerIndex: number;
+  name: string;
+  voiceprintId: string | null;
+  confidence: number;
+}): void {
+  sessionLabels.setLabel(msg.speakerIndex, msg.name);
+  debugLog(`✅ Identified speaker ${msg.speakerIndex} as "${msg.name}" (${(msg.confidence * 100).toFixed(1)}%)`);
+  updateSpeakersPanel();
+}
 
 // ─── Mode Toggle ──────────────────────────────────────────────
 
@@ -166,11 +219,34 @@ function initModeToggle(): void {
       modeAnon.classList.toggle('selected', mode === 'anonymous');
       modeContacts.classList.toggle('selected', mode === 'contacts');
       debugLog(`Mode: ${mode}`);
+
+      // When switching to contacts mode, load voiceprints on server session
+      if (mode === 'contacts') {
+        loadVoiceprintsOnServer();
+      }
     };
 
     modeAnon.addEventListener('click', () => setMode('anonymous'));
     modeContacts.addEventListener('click', () => setMode('contacts'));
   }
+}
+
+/** Send all stored contacts to the server for this session */
+function loadVoiceprintsOnServer(): void {
+  const ws = (app as any).ws as WebSocket | null;
+  if (ws?.readyState !== WebSocket.OPEN) return;
+
+  const contacts = contactStore.getAll();
+  if (contacts.length === 0) return;
+
+  const voiceprints = contacts.map(c => ({
+    id: c.id,
+    name: c.name,
+    embedding: c.embedding,
+  }));
+
+  ws.send(JSON.stringify({ type: 'load_voiceprints', voiceprints }));
+  debugLog(`Loaded ${voiceprints.length} voiceprint(s) for speaker matching`);
 }
 
 // ─── Contacts Panel ───────────────────────────────────────────
@@ -204,7 +280,6 @@ function renderContacts(): void {
     `;
   }).join('');
 
-  // Wire delete buttons
   listEl.querySelectorAll('[data-delete]').forEach(btn => {
     btn.addEventListener('click', (e) => {
       const id = (e.currentTarget as HTMLElement).getAttribute('data-delete');
@@ -224,7 +299,11 @@ function initContacts(): void {
     contactsToggle.classList.toggle('open', isOpen);
   });
 
-  // Export button
+  // Add Contact button → open fresh enrollment modal
+  document.getElementById('btn-add-contact')?.addEventListener('click', () => {
+    openEnrollModal(null, null);
+  });
+
   document.getElementById('btn-export')?.addEventListener('click', () => {
     const data = contactStore.export();
     const json = JSON.stringify(data, null, 2);
@@ -238,7 +317,6 @@ function initContacts(): void {
     debugLog('Contacts exported');
   });
 
-  // Delete all button
   document.getElementById('btn-delete-all')?.addEventListener('click', () => {
     if (confirm('Delete ALL saved contacts and voiceprints? This cannot be undone.')) {
       contactStore.deleteAll();
@@ -247,7 +325,6 @@ function initContacts(): void {
     }
   });
 
-  // Re-render on changes
   contactStore.onChange(renderContacts);
   renderContacts();
 }
@@ -255,7 +332,6 @@ function initContacts(): void {
 // ─── Speakers Panel (live session) ────────────────────────────
 
 function initSpeakersPanel(): void {
-  const panel = document.getElementById('speakers-panel');
   const toggle = document.getElementById('speakers-toggle');
   const body = document.getElementById('speakers-body');
 
@@ -264,7 +340,6 @@ function initSpeakersPanel(): void {
     toggle.classList.toggle('open', isOpen);
   });
 
-  // Show panel when speakers are detected
   app.onTranscriptUpdate = ((origCallback) => {
     return (text: string) => {
       origCallback?.(text);
@@ -293,12 +368,15 @@ function updateSpeakersPanel(): void {
 
     return `
       <div class="speaker-item">
-        <div style="display:flex;align-items:center;">
+        <div style="display:flex;align-items:center;gap:4px;">
           <span class="speaker-tag">${s.letter}</span>
           <input class="speaker-name-input" data-speaker="${s.index}"
             value="${labelInfo ? labelInfo.name : ''}"
             placeholder="${displayName}" />
           <span class="speaker-type">${typeLabel}</span>
+          <button class="btn-save-speaker" data-save-speaker="${s.index}"
+            data-speaker-label="${labelInfo?.name || displayName}"
+            title="Save as contact using session audio">💾</button>
         </div>
       </div>
     `;
@@ -318,6 +396,230 @@ function updateSpeakersPanel(): void {
       }
     });
   });
+
+  // Wire up 💾 save-as-contact buttons
+  listEl.querySelectorAll('[data-save-speaker]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const el = e.currentTarget as HTMLElement;
+      const idx = parseInt(el.getAttribute('data-save-speaker') || '0', 10);
+      const label = el.getAttribute('data-speaker-label') || `Speaker ${idx}`;
+      openEnrollModal(idx, label);
+    });
+  });
+}
+
+// ─── Enrollment Modal ─────────────────────────────────────────
+
+const ENROLL_MAX_SECONDS = 15;
+
+let enrollCountdownTimer: ReturnType<typeof setInterval> | null = null;
+let enrollFromSpeakerIndex: number | null = null; // null = use mic, number = from buffer
+
+/** Open the "Add Contact" modal.
+ *  speakerIndex=null → mic recording flow
+ *  speakerIndex=number → enroll_from_buffer flow
+ */
+function openEnrollModal(speakerIndex: number | null, prefillName: string | null): void {
+  enrollFromSpeakerIndex = speakerIndex;
+
+  const backdrop = document.getElementById('enroll-modal-backdrop');
+  const nameInput = document.getElementById('enroll-name-input') as HTMLInputElement;
+  const status = document.getElementById('enroll-status');
+  const progress = document.getElementById('enroll-progress');
+  const btnStart = document.getElementById('enroll-btn-start');
+  const btnStop = document.getElementById('enroll-btn-stop');
+
+  if (!backdrop || !nameInput || !status || !progress || !btnStart || !btnStop) return;
+
+  // Reset state
+  resetEnrollModalState();
+
+  // Pre-fill name if provided
+  if (prefillName) nameInput.value = prefillName;
+
+  if (speakerIndex !== null) {
+    // From-buffer mode: show different CTA
+    if (btnStart) btnStart.textContent = '💾 Save from Session';
+    if (status) status.textContent = `Will use buffered audio from Speaker ${String.fromCharCode(65 + speakerIndex)}.`;
+  } else {
+    if (btnStart) btnStart.textContent = '🎙 Start Recording';
+  }
+
+  backdrop.classList.add('open');
+  nameInput.focus();
+}
+
+function closeEnrollModal(): void {
+  const backdrop = document.getElementById('enroll-modal-backdrop');
+  backdrop?.classList.remove('open');
+  resetEnrollModalState();
+  enrollmentRecorder.cancelEnrollment();
+}
+
+function resetEnrollModalState(): void {
+  stopEnrollCountdown();
+
+  const nameInput = document.getElementById('enroll-name-input') as HTMLInputElement | null;
+  const status = document.getElementById('enroll-status');
+  const progress = document.getElementById('enroll-progress');
+  const progressFill = document.getElementById('enroll-progress-fill') as HTMLElement | null;
+  const progressLabel = document.getElementById('enroll-progress-label');
+  const btnStart = document.getElementById('enroll-btn-start');
+  const btnStop = document.getElementById('enroll-btn-stop');
+
+  if (nameInput) nameInput.value = '';
+  if (nameInput) nameInput.disabled = false;
+  if (status) { status.textContent = ''; status.className = 'enroll-status'; }
+  if (progress) progress.classList.remove('visible');
+  if (progressFill) progressFill.style.width = '0%';
+  if (progressLabel) progressLabel.textContent = `0 / ${ENROLL_MAX_SECONDS}s`;
+  if (btnStart) { btnStart.style.display = ''; (btnStart as HTMLButtonElement).disabled = false; }
+  if (btnStop) btnStop.style.display = 'none';
+}
+
+function stopEnrollCountdown(): void {
+  if (enrollCountdownTimer !== null) {
+    clearInterval(enrollCountdownTimer);
+    enrollCountdownTimer = null;
+  }
+}
+
+function startEnrollCountdown(onComplete: () => void): void {
+  const progress = document.getElementById('enroll-progress');
+  const progressFill = document.getElementById('enroll-progress-fill') as HTMLElement | null;
+  const progressLabel = document.getElementById('enroll-progress-label');
+  const btnStart = document.getElementById('enroll-btn-start');
+  const btnStop = document.getElementById('enroll-btn-stop');
+
+  progress?.classList.add('visible');
+  if (btnStart) btnStart.style.display = 'none';
+  if (btnStop) btnStop.style.display = '';
+
+  let elapsed = 0;
+  const INTERVAL_MS = 250;
+
+  enrollCountdownTimer = setInterval(() => {
+    elapsed += INTERVAL_MS / 1000;
+    const pct = Math.min((elapsed / ENROLL_MAX_SECONDS) * 100, 100);
+
+    if (progressFill) progressFill.style.width = `${pct}%`;
+    if (progressLabel) progressLabel.textContent = `${elapsed.toFixed(1)} / ${ENROLL_MAX_SECONDS}s`;
+
+    if (elapsed >= ENROLL_MAX_SECONDS) {
+      stopEnrollCountdown();
+      onComplete();
+    }
+  }, INTERVAL_MS);
+}
+
+function setEnrollStatus(msg: string, type: 'ok' | 'err' | 'info' = 'info'): void {
+  const status = document.getElementById('enroll-status');
+  if (!status) return;
+  status.textContent = msg;
+  status.className = type === 'ok' ? 'enroll-status ok'
+    : type === 'err' ? 'enroll-status err'
+    : 'enroll-status';
+}
+
+function initEnrollModal(): void {
+  document.getElementById('enroll-modal-close')?.addEventListener('click', closeEnrollModal);
+
+  // Close on backdrop click
+  document.getElementById('enroll-modal-backdrop')?.addEventListener('click', (e) => {
+    if (e.target === document.getElementById('enroll-modal-backdrop')) {
+      closeEnrollModal();
+    }
+  });
+
+  // Start button
+  document.getElementById('enroll-btn-start')?.addEventListener('click', async () => {
+    const nameInput = document.getElementById('enroll-name-input') as HTMLInputElement;
+    const name = nameInput?.value.trim();
+
+    if (!name) {
+      setEnrollStatus('Please enter a name first.', 'err');
+      nameInput?.focus();
+      return;
+    }
+
+    const btnStart = document.getElementById('enroll-btn-start') as HTMLButtonElement;
+    if (btnStart) btnStart.disabled = true;
+    if (nameInput) nameInput.disabled = true;
+
+    // ── From-buffer mode ────────────────────────────────────
+    if (enrollFromSpeakerIndex !== null) {
+      setEnrollStatus('Processing session audio…');
+
+      const outcome = await enrollmentRecorder.enrollFromBuffer(
+        enrollFromSpeakerIndex,
+        name,
+      );
+
+      if (outcome.success) {
+        setEnrollStatus(`Contact "${name}" saved! ✓`, 'ok');
+        renderContacts();
+        debugLog(`Enrolled "${name}" from session buffer`);
+        setTimeout(closeEnrollModal, 1500);
+      } else {
+        setEnrollStatus(outcome.error, 'err');
+        if (btnStart) btnStart.disabled = false;
+        if (nameInput) nameInput.disabled = false;
+      }
+      return;
+    }
+
+    // ── Mic recording mode ──────────────────────────────────
+    try {
+      await enrollmentRecorder.startEnrollment();
+    } catch (err: any) {
+      setEnrollStatus(`Mic error: ${err?.message || 'denied'}`, 'err');
+      if (btnStart) btnStart.disabled = false;
+      if (nameInput) nameInput.disabled = false;
+      return;
+    }
+
+    setEnrollStatus('Recording… speak naturally for 15 seconds.');
+
+    startEnrollCountdown(() => {
+      // Auto-stop at 15s
+      handleEnrollStop(name);
+    });
+  });
+
+  // Stop button
+  document.getElementById('enroll-btn-stop')?.addEventListener('click', () => {
+    const nameInput = document.getElementById('enroll-name-input') as HTMLInputElement;
+    const name = nameInput?.value.trim() || 'Unknown';
+    stopEnrollCountdown();
+    handleEnrollStop(name);
+  });
+}
+
+async function handleEnrollStop(name: string): Promise<void> {
+  stopEnrollCountdown();
+
+  const btnStop = document.getElementById('enroll-btn-stop');
+  const btnStart = document.getElementById('enroll-btn-start');
+  if (btnStop) btnStop.style.display = 'none';
+
+  setEnrollStatus('Processing… extracting voice signature.');
+
+  const outcome = await enrollmentRecorder.stopEnrollment(name);
+
+  if (outcome.success) {
+    setEnrollStatus(`Contact "${name}" saved! ✓`, 'ok');
+    renderContacts();
+    debugLog(`Enrolled contact "${name}" (${outcome.durationMs}ms sample)`);
+    setTimeout(closeEnrollModal, 1500);
+  } else {
+    setEnrollStatus(outcome.error, 'err');
+    // Show retry: re-enable start button
+    if (btnStart) {
+      (btnStart as HTMLButtonElement).disabled = false;
+      btnStart.style.display = '';
+      (document.getElementById('enroll-name-input') as HTMLInputElement).disabled = false;
+    }
+  }
 }
 
 // ─── Boot ─────────────────────────────────────────────────────
@@ -327,9 +629,12 @@ initToggles();
 initModeToggle();
 initContacts();
 initSpeakersPanel();
+initEnrollModal();
 
 app.init().then(() => {
   console.log('[LiveCaption] Ready');
+  // Initial WS wrap (may already be connected at this point)
+  setTimeout(rewrapWsOnMessage, 100);
 }).catch((err) => {
   console.error('[LiveCaption] Failed to initialize:', err);
   if (statusEl) {
