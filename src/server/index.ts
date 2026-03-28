@@ -40,7 +40,7 @@ const deepgram = createClient(DG_API_KEY, {
 const embeddingProvider = new RealEmbeddingProvider();
 
 // ─── Speaker matching constants ─────────────────────────────────────────────
-const MATCH_THRESHOLD = 0.75;   // Lower than mock tests — real audio is noisier
+const MATCH_THRESHOLD = 0.65;   // MFCC-based embeddings on real audio — keep permissive
 const MIN_AUDIO_MS = 3000;      // Need 3s of speech before attempting match
 const MATCH_RETRY_MS = 5000;    // Don't retry a failed match within 5s
 
@@ -273,6 +273,8 @@ wss.on('connection', (clientWs: WebSocket) => {
             bestVp = { id: vp.id, name: vp.name, embedding: vp.embedding };
           }
         }
+
+        console.log(`🔍 Speaker ${speakerIndex} best match: "${bestVp?.name ?? 'none'}" score=${bestScore.toFixed(3)} threshold=${MATCH_THRESHOLD}`);
 
         if (bestVp && bestScore >= MATCH_THRESHOLD) {
           tracker.identified = true;

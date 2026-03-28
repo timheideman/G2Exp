@@ -367,6 +367,12 @@ function initContacts(): void {
   });
 
   contactStore.onChange(renderContacts);
+  // Re-sync voiceprints to server whenever ContactStore changes (e.g. after enrollment)
+  contactStore.onChange(() => {
+    if (app.settings.current.idMode === 'contacts') {
+      loadVoiceprintsOnServer();
+    }
+  });
   renderContacts();
 }
 
