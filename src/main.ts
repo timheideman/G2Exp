@@ -331,6 +331,39 @@ function initContacts(): void {
     }
   });
 
+  const importInput = document.getElementById('btn-import') as HTMLInputElement | null;
+  const importStatus = document.getElementById('import-status');
+
+  importInput?.addEventListener('change', async () => {
+    const file = importInput.files?.[0];
+    if (!file || !importStatus) return;
+
+    importStatus.textContent = 'Importing…';
+    importStatus.style.color = '#888';
+
+    const result = await contactStore.importFromFile(file);
+    importInput.value = ''; // reset so same file can be re-imported if needed
+
+    if (result.error) {
+      importStatus.textContent = `❌ ${result.error}`;
+      importStatus.style.color = '#FF453A';
+      debugLog(`Import failed: ${result.error}`);
+    } else if (result.imported === 0) {
+      importStatus.textContent = `No new contacts — all ${result.skipped} already saved.`;
+      importStatus.style.color = '#888';
+      debugLog('Import: no new contacts');
+    } else {
+      importStatus.textContent = `✅ Imported ${result.imported} contact${result.imported !== 1 ? 's' : ''}${result.skipped ? ` (${result.skipped} already existed)` : ''}.`;
+      importStatus.style.color = '#30D158';
+      debugLog(`Imported ${result.imported} contact(s)`);
+      // Re-sync to server if in contacts mode
+      if (app.settings.current.idMode === 'contacts') loadVoiceprintsOnServer();
+    }
+
+    // Clear status after 4 seconds
+    setTimeout(() => { if (importStatus) importStatus.textContent = ''; }, 4000);
+  });
+
   contactStore.onChange(renderContacts);
   renderContacts();
 }

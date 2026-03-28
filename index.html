@@ -343,12 +343,16 @@
       </div>
       <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
         <button class="btn" id="btn-add-contact" style="font-size:12px;padding:6px 14px;">➕ Add Contact</button>
-        <button class="btn" id="btn-export" style="font-size:12px;padding:6px 14px;">📤 Export All</button>
+        <button class="btn" id="btn-export" style="font-size:12px;padding:6px 14px;">📤 Export</button>
+        <label class="btn" id="btn-import-label" style="font-size:12px;padding:6px 14px;cursor:pointer;">📥 Import
+          <input type="file" id="btn-import" accept=".json" style="display:none;" />
+        </label>
         <button class="btn" id="btn-delete-all" style="font-size:12px;padding:6px 14px;color:#FF453A;border-color:#3a1a1a;">🗑️ Delete All</button>
       </div>
-      <div style="font-size:10px;color:#444;margin-top:10px;line-height:1.5;">
+      <div id="import-status" style="font-size:12px;margin-top:6px;min-height:16px;"></div>
+      <div style="font-size:10px;color:#444;margin-top:8px;line-height:1.5;">
         🔒 Voiceprints are stored on this device only. They never leave your phone.<br>
-        📋 Use Export to download a copy. Use Delete to permanently remove biometric data.
+        📋 Export saves a backup file. Import restores from a previous export (merges, no duplicates).
       </div>
     </div>
   </div>
