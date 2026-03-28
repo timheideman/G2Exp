@@ -112,6 +112,19 @@ export class LiveCaptionApp {
   // ─── Glasses Mode ───────────────────────────────────────────
 
   private async initGlasses(): Promise<void> {
+    // Hide the desktop simulator — on iPhone the real glasses display is used
+    const simContainer = document.querySelector('.sim-container') as HTMLElement | null;
+    if (simContainer) simContainer.style.display = 'none';
+
+    // Hide desktop-only hint about mic/port
+    const hint = document.querySelector('.hint') as HTMLElement | null;
+    if (hint) hint.style.display = 'none';
+
+    // Hide the Start/Pause toggle (audio is controlled by double-tap on glasses)
+    const btnToggle = document.getElementById('btn-toggle') as HTMLElement | null;
+    if (btnToggle) btnToggle.style.display = 'none';
+
+
     const { TextContainerProperty, CreateStartUpPageContainer, OsEventTypeList } = this.sdk;
 
     const container = new TextContainerProperty({

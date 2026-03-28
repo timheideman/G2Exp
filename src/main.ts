@@ -10,6 +10,7 @@ import { LANGUAGES } from './types/settings';
 import { ContactStore } from './glass/contact-store';
 import { SessionLabels } from './glass/session-labels';
 import { EnrollmentRecorder } from './glass/enrollment-recorder';
+import { isDebugEnabled } from './glass/debug-flag';
 import type { IdentificationMode } from './types/privacy';
 
 const app = new LiveCaptionApp();
@@ -120,6 +121,7 @@ function initToggles(): void {
 // ─── Debug Panel ──────────────────────────────────────────────
 
 const debugEl = document.getElementById('debug');
+if (debugEl && !isDebugEnabled()) debugEl.style.display = 'none';
 const origLog = console.log;
 const origErr = console.error;
 
