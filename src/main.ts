@@ -692,6 +692,146 @@ async function handleEnrollStop(name: string): Promise<void> {
   }
 }
 
+// ─── Name Alert ───────────────────────────────────────────────
+
+/**
+ * Show a prominent banner in the companion UI when the user's name is detected.
+ * Auto-dismisses after 3 seconds.
+ */
+function showNameAlertNotification(label: string): void {
+  const banner = document.createElement('div');
+  banner.className = 'name-alert-banner';
+  banner.textContent = `📣 ${label}`;
+  document.body.appendChild(banner);
+  // Remove after animation completes (3s)
+  setTimeout(() => banner.remove(), 3100);
+}
+
+function updateNameAlertStatus(): void {
+  const statusEl = document.getElementById('name-alert-status');
+  const statusText = document.getElementById('name-alert-status-text');
+  if (!statusEl || !statusText) return;
+
+  const detector = app.nameAlertDetector;
+  if (detector?.isActive) {
+    statusEl.className = 'name-alert-status active';
+    statusText.textContent = '● Active';
+  } else {
+    statusEl.className = 'name-alert-status';
+    statusText.textContent = '○ Inactive — upload a .ppn file to activate';
+  }
+}
+
+function initNameAlertSettings(): void {
+  // Collapsible panel
+  const toggle = document.getElementById('name-alert-toggle');
+  const body = document.getElementById('name-alert-body');
+  toggle?.addEventListener('click', () => {
+    const isOpen = body?.classList.toggle('open');
+    toggle.classList.toggle('open', isOpen);
+  });
+
+  const nameInput = document.getElementById('name-alert-name') as HTMLInputElement | null;
+  const keyInput = document.getElementById('name-alert-key') as HTMLInputElement | null;
+  const ppnInput = document.getElementById('name-alert-ppn') as HTMLInputElement | null;
+  const sensitivityInput = document.getElementById('name-alert-sensitivity') as HTMLInputElement | null;
+  const sensitivityVal = document.getElementById('name-alert-sensitivity-val');
+  const enableToggle = document.getElementById('toggle-name-alert');
+  const ppnNotice = document.getElementById('name-alert-ppn-notice');
+
+  // Restore persisted values
+  const savedName = localStorage.getItem('nameAlert.name') || '';
+  const savedKey = localStorage.getItem('nameAlert.accessKey') || '';
+  const savedSensitivity = localStorage.getItem('nameAlert.sensitivity') || '0.5';
+
+  if (nameInput) nameInput.value = savedName;
+  if (keyInput) keyInput.value = savedKey;
+  if (sensitivityInput) {
+    sensitivityInput.value = savedSensitivity;
+    if (sensitivityVal) sensitivityVal.textContent = savedSensitivity;
+  }
+
+  // Persist name
+  nameInput?.addEventListener('change', () => {
+    localStorage.setItem('nameAlert.name', nameInput.value.trim());
+  });
+
+  // Persist access key
+  keyInput?.addEventListener('change', () => {
+    localStorage.setItem('nameAlert.accessKey', keyInput.value.trim());
+  });
+
+  // Sensitivity slider
+  sensitivityInput?.addEventListener('input', () => {
+    if (sensitivityVal) sensitivityVal.textContent = sensitivityInput.value;
+    localStorage.setItem('nameAlert.sensitivity', sensitivityInput.value);
+  });
+
+  // Enable/disable toggle (only meaningful after .ppn is loaded)
+  let _ppnBuffer: ArrayBuffer | null = null;
+
+  const tryInit = async (forceEnable = false) => {
+    const accessKey = keyInput?.value.trim() || '';
+    const label = nameInput?.value.trim() || 'You';
+    const sensitivity = parseFloat(sensitivityInput?.value || '0.5');
+
+    if (!accessKey || !_ppnBuffer) {
+      setNameAlertStatusMsg('Missing AccessKey or .ppn file', false);
+      return;
+    }
+
+    setNameAlertStatusMsg('Initializing…', false);
+    try {
+      await app.initNameAlert(accessKey, _ppnBuffer, label, sensitivity);
+      updateNameAlertStatus();
+      if (enableToggle) enableToggle.classList.toggle('on', app.nameAlertDetector.isActive);
+      debugLog(`[NameAlert] Initialized for "${label}"`);
+    } catch (err: any) {
+      setNameAlertStatusMsg(`Error: ${err?.message || err}`, true);
+      debugLog(`[NameAlert] Init failed: ${err}`);
+    }
+  };
+
+  // .ppn file picker
+  ppnInput?.addEventListener('change', async () => {
+    const file = ppnInput.files?.[0];
+    if (!file) return;
+    _ppnBuffer = await file.arrayBuffer();
+    if (ppnNotice) ppnNotice.style.display = '';
+    debugLog(`[NameAlert] Loaded .ppn: ${file.name}`);
+    await tryInit();
+  });
+
+  // Enable toggle
+  enableToggle?.addEventListener('click', async () => {
+    const isOn = enableToggle.classList.contains('on');
+    if (isOn) {
+      await app.nameAlertDetector.destroy();
+      enableToggle.classList.remove('on');
+      updateNameAlertStatus();
+      debugLog('[NameAlert] Disabled');
+    } else {
+      await tryInit(true);
+    }
+  });
+
+  // Wire callback so companion UI shows the banner
+  app.onNameAlerted = (label: string) => {
+    showNameAlertNotification(label);
+    debugLog(`[NameAlert] 📣 Detected: "${label}"`);
+  };
+
+  updateNameAlertStatus();
+}
+
+function setNameAlertStatusMsg(msg: string, isError: boolean): void {
+  const statusEl = document.getElementById('name-alert-status');
+  const statusText = document.getElementById('name-alert-status-text');
+  if (!statusEl || !statusText) return;
+  statusEl.className = `name-alert-status${isError ? ' error' : ''}`;
+  statusText.textContent = msg;
+}
+
 // ─── Boot ─────────────────────────────────────────────────────
 
 buildLanguageGrid();
@@ -700,6 +840,7 @@ initModeToggle();
 initContacts();
 initSpeakersPanel();
 initEnrollModal();
+initNameAlertSettings();
 
 app.init().then(() => {
   console.log('[LiveCaption] Ready');

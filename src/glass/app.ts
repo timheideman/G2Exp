@@ -17,6 +17,7 @@ import { BrowserAudioCapture } from './browser-audio';
 import { DisplaySimulator } from './display-simulator';
 import { SettingsManager } from './settings-manager';
 import { ReconnectScheduler } from './settings-manager';
+import { NameAlertDetector } from './name-alert-detector';
 import type { LiveCaptionSettings, ConfigMessage } from '../types/settings';
 
 // Server URL — configurable via window global or auto-detected from current page
@@ -48,9 +49,12 @@ export class LiveCaptionApp {
 
   readonly settings = new SettingsManager();
 
+  private nameAlert = new NameAlertDetector();
+
   // Callbacks for UI integration
   onStatusChange?: (status: string, connected: boolean) => void;
   onTranscriptUpdate?: (text: string) => void;
+  onNameAlerted?: (label: string) => void;
 
   async init(): Promise<void> {
     // Listen for settings changes
@@ -150,6 +154,7 @@ export class LiveCaptionApp {
     this.bridge.onEvenHubEvent((event: any) => {
       if (event.audioEvent?.audioPcm && this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(event.audioEvent.audioPcm);
+        this.nameAlert.process(event.audioEvent.audioPcm);
       }
       const eventType = event.textEvent?.eventType ?? event.sysEvent?.eventType;
       if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
@@ -191,6 +196,7 @@ export class LiveCaptionApp {
       if (this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(pcm);
       }
+      this.nameAlert.process(pcm);
     });
 
     this.setStatus('Ready — click Start to begin', false);
@@ -338,6 +344,53 @@ export class LiveCaptionApp {
     return this.display.getSpeakers();
   }
 
+  // ─── Name Alert ──────────────────────────────────────────────
+
+  /**
+   * Initialize the name alert detector with the user's AccessKey and .ppn file.
+   * Safe to call multiple times (re-initializes on each call).
+   */
+  async initNameAlert(
+    accessKey: string,
+    keywordBuffer: ArrayBuffer,
+    label: string,
+    sensitivity?: number,
+  ): Promise<void> {
+    this.nameAlert.onDetected = (lbl) => this.showNameAlert(lbl);
+    await this.nameAlert.init(accessKey, keywordBuffer, label, sensitivity);
+  }
+
+  /** Expose nameAlert for status inspection from UI code. */
+  get nameAlertDetector(): NameAlertDetector {
+    return this.nameAlert;
+  }
+
+  /**
+   * Called when Porcupine detects the wake word.
+   * Shows a prominent alert on the glasses display and notifies the companion UI.
+   */
+  private showNameAlert(label: string): void {
+    // Notify companion UI (main.ts wires this up)
+    this.onNameAlerted?.(label);
+
+    const alertText = `  👋  ${label.toUpperCase()}`;
+
+    if (this.mode === 'glasses') {
+      // Override glasses display temporarily
+      this.updateGlassesDisplay(alertText);
+      setTimeout(() => this.updateDisplay(), 3000);
+    } else {
+      // In browser mode: force-render the alert as if it were a transcript update
+      if (this.onTranscriptUpdate) {
+        this.onTranscriptUpdate(alertText);
+        setTimeout(() => {
+          // Restore normal transcript view
+          this.onTranscriptUpdate?.(this.display.render());
+        }, 3000);
+      }
+    }
+  }
+
   async destroy(): Promise<void> {
     this.reconnectScheduler.cancel();
     this.displaySim?.destroy();
@@ -346,5 +399,6 @@ export class LiveCaptionApp {
       await this.bridge?.audioControl(false);
     }
     this.ws?.close();
+    await this.nameAlert.destroy();
   }
 }

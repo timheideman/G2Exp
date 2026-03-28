@@ -250,6 +250,53 @@
 
     .modal-actions { display: flex; gap: 8px; }
     .modal-actions .btn { flex: 1; padding: 9px 16px; font-size: 13px; }
+
+    /* ── Name Alert ── */
+    .name-alert-row {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .name-alert-status {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: #666; margin-top: 12px;
+    }
+    .name-alert-status .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #444; display: inline-block; flex-shrink: 0;
+    }
+    .name-alert-status.active .dot { background: #4BB956; }
+    .name-alert-status.error  .dot { background: #FF453A; }
+    .name-alert-notice {
+      font-size: 11px; color: #f5a623; margin-top: 8px;
+    }
+    .name-alert-instructions {
+      font-size: 12px; color: #555; margin-top: 12px;
+      line-height: 1.7; border-top: 1px solid #1a1a1a; padding-top: 10px;
+    }
+    .name-alert-instructions summary {
+      cursor: pointer; color: #666; font-size: 12px;
+      list-style: none; user-select: none;
+    }
+    .name-alert-instructions summary::before { content: "▶  "; font-size: 10px; }
+    .name-alert-instructions[open] summary::before { content: "▼  "; }
+    .name-alert-instructions a { color: #4BB956; text-decoration: none; }
+
+    /* ── Name alert notification banner ── */
+    @keyframes nameAlertFadeOut {
+      0%   { opacity: 1; transform: translateX(-50%) translateY(0); }
+      75%  { opacity: 1; }
+      100% { opacity: 0; transform: translateX(-50%) translateY(-16px); }
+    }
+    .name-alert-banner {
+      position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+      background: #1a8a3a; color: #fff;
+      padding: 14px 32px; border-radius: 12px;
+      font-size: 22px; font-weight: 600; letter-spacing: 0.3px;
+      z-index: 9999; pointer-events: none;
+      white-space: nowrap;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+      animation: nameAlertFadeOut 3s ease-out forwards;
+    }
   </style>
 </head>
 <body>
@@ -354,6 +401,68 @@
         🔒 Voiceprints are stored on this device only. They never leave your phone.<br>
         📋 Export saves a backup file. Import restores from a previous export (merges, no duplicates).
       </div>
+    </div>
+  </div>
+
+  <!-- ── Name Alert Panel ── -->
+  <div class="settings">
+    <div class="settings-header" id="name-alert-toggle">
+      <h3>🔔 Name Alert</h3>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="settings-body" id="name-alert-body">
+
+      <!-- Enable toggle row -->
+      <div class="name-alert-row" style="margin-top:14px;">
+        <span style="font-size:13px;color:#ccc;">Wake word detection</span>
+        <div class="toggle" id="toggle-name-alert"></div>
+      </div>
+
+      <div class="setting-group">
+        <label for="name-alert-name">Your name</label>
+        <input type="text" id="name-alert-name" placeholder="e.g. Tim"
+          autocomplete="off" maxlength="32"
+          style="width:100%;background:#1a1a1a;border:1px solid #333;border-radius:6px;
+                 color:#ddd;padding:9px 12px;font-size:14px;outline:none;box-sizing:border-box;" />
+      </div>
+
+      <div class="setting-group">
+        <label for="name-alert-key">Picovoice AccessKey</label>
+        <input type="password" id="name-alert-key" placeholder="Paste your access key"
+          autocomplete="off"
+          style="width:100%;background:#1a1a1a;border:1px solid #333;border-radius:6px;
+                 color:#ddd;padding:9px 12px;font-size:14px;outline:none;box-sizing:border-box;" />
+      </div>
+
+      <div class="setting-group">
+        <label for="name-alert-ppn">Wake word model (.ppn)</label>
+        <input type="file" id="name-alert-ppn" accept=".ppn"
+          style="font-size:13px;color:#aaa;width:100%;" />
+        <div class="name-alert-notice" id="name-alert-ppn-notice" style="display:none;">
+          ⚠️ Re-upload your .ppn file after page refresh (not stored locally).
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <label for="name-alert-sensitivity">Sensitivity: <span id="name-alert-sensitivity-val">0.5</span></label>
+        <input type="range" id="name-alert-sensitivity" min="0.1" max="0.9" step="0.1" value="0.5"
+          style="width:100%;accent-color:#4BB956;" />
+      </div>
+
+      <div class="name-alert-status" id="name-alert-status">
+        <span class="dot"></span>
+        <span id="name-alert-status-text">Inactive — upload a .ppn file to activate</span>
+      </div>
+
+      <details class="name-alert-instructions">
+        <summary>Setup instructions</summary>
+        <ol style="margin:8px 0 0 16px;padding:0;">
+          <li>Get a free AccessKey at <a href="https://picovoice.ai" target="_blank" rel="noopener">picovoice.ai</a></li>
+          <li>Go to <a href="https://console.picovoice.ai/" target="_blank" rel="noopener">console.picovoice.ai</a> → Create wake word → type your name → Download <code>.ppn</code> for <strong>Web (WASM)</strong></li>
+          <li>Enter your AccessKey above, upload the <code>.ppn</code> file, and activate the toggle</li>
+        </ol>
+      </details>
+
     </div>
   </div>
 

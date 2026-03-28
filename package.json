@@ -16,6 +16,7 @@
   "dependencies": {
     "@deepgram/sdk": "^3.9.0",
     "@evenrealities/even_hub_sdk": "latest",
+    "@picovoice/porcupine-web": "^4.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
