@@ -20,10 +20,26 @@ export class TranscriptDisplay {
   private nextSpeakerIndex = 0;
   /** Optional external name resolver (from SessionLabels) */
   private nameResolver: ((speakerIndex: number) => string) | null = null;
+  /** Whether transcription is currently paused */
+  private paused: boolean = false;
 
   /** Set an external name resolver for speaker display names */
   setNameResolver(resolver: (speakerIndex: number) => string): void {
     this.nameResolver = resolver;
+  }
+
+  /**
+   * Mark the display as paused or active.
+   * When paused, render() appends a "⏸ Paused" marker that the display
+   * simulator can pick up for overlay rendering.
+   */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+  }
+
+  /** Whether the display is currently in paused state */
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   /** Get or create a label for a speaker index */

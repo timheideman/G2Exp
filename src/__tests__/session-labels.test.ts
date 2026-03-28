@@ -126,4 +126,41 @@ describe('SessionLabels', () => {
       expect(labels.getAllLabels()).toHaveLength(0);
     });
   });
+
+  describe('applyServerIdentification', () => {
+    it('updates the display name for a speaker index', () => {
+      labels.applyServerIdentification(0, 'Sarah van Berg', 'vp-sarah-01');
+      expect(labels.getDisplayName(0)).toBe('Sarah van Berg');
+    });
+
+    it('identified name takes priority over session label', () => {
+      labels.setLabel(0, 'Doctor');
+      labels.applyServerIdentification(0, 'Dr. Janssen', 'vp-janssen');
+      expect(labels.getDisplayName(0)).toBe('Dr. Janssen');
+    });
+
+    it('works when voiceprintId is null', () => {
+      labels.applyServerIdentification(1, 'Marco', null);
+      expect(labels.getDisplayName(1)).toBe('Marco');
+      expect(labels.getShortTag(1)).toBe('Marco');
+    });
+
+    it('appears as identified type in getAllLabels', () => {
+      labels.applyServerIdentification(2, 'Tim', 'vp-tim');
+      const all = labels.getAllLabels();
+      expect(all).toHaveLength(1);
+      expect(all[0]).toEqual({ speakerIndex: 2, name: 'Tim', type: 'identified' });
+    });
+
+    it('updates an existing identification', () => {
+      labels.applyServerIdentification(0, 'Sarah', 'vp-1');
+      labels.applyServerIdentification(0, 'Sarah van Berg', 'vp-1');
+      expect(labels.getDisplayName(0)).toBe('Sarah van Berg');
+    });
+
+    it('bridges server pipeline to display: short tag uses first name', () => {
+      labels.applyServerIdentification(0, 'Bartholomew Smith', 'vp-x');
+      expect(labels.getShortTag(0)).toBe('Barthol.');
+    });
+  });
 });

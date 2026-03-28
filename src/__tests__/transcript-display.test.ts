@@ -146,4 +146,33 @@ describe('TranscriptDisplay', () => {
       expect(display.getSpeakers()).toHaveLength(0);
     });
   });
+
+  describe('paused state', () => {
+    it('starts unpaused', () => {
+      expect(display.isPaused).toBe(false);
+    });
+
+    it('setPaused(true) sets isPaused to true', () => {
+      display.setPaused(true);
+      expect(display.isPaused).toBe(true);
+    });
+
+    it('setPaused(false) clears paused state', () => {
+      display.setPaused(true);
+      display.setPaused(false);
+      expect(display.isPaused).toBe(false);
+    });
+
+    it('render output is unchanged when paused — overlay is drawn by DisplaySimulator', () => {
+      display.addFinal(0, 'Hello');
+      const before = display.render();
+
+      display.setPaused(true);
+      const after = display.render();
+
+      // TranscriptDisplay render itself does not change — the overlay is
+      // handled by DisplaySimulator.setPaused() on the canvas layer
+      expect(after).toBe(before);
+    });
+  });
 });

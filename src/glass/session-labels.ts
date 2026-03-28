@@ -28,6 +28,30 @@ export class SessionLabels {
     this.identifiedNames.set(speakerIndex, name);
   }
 
+  /**
+   * Apply a server-resolved speaker identification.
+   *
+   * Called when the server sends a `speaker_identified` message after
+   * matching audio against the voiceprint store. Updates the session
+   * display name for the given speaker index so the glasses show the
+   * contact's name instead of a generic letter.
+   *
+   * @param speakerIndex  Deepgram speaker index (0-based)
+   * @param name          Resolved contact name from the voiceprint match
+   * @param voiceprintId  ID of the matched voiceprint, or null if unavailable
+   */
+  applyServerIdentification(
+    speakerIndex: number,
+    name: string,
+    voiceprintId: string | null,
+  ): void {
+    this.setIdentified(speakerIndex, name);
+    // voiceprintId is available for callers that need to cross-reference
+    // the contact store (e.g., to update lastMatchedAt in the UI).
+    // We don't persist it here since SessionLabels is session-scoped.
+    void voiceprintId;
+  }
+
   /** Remove a temporary label */
   removeLabel(speakerIndex: number): void {
     this.labels.delete(speakerIndex);

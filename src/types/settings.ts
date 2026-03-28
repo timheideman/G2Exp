@@ -46,4 +46,6 @@ export interface ConfigMessage {
   language: string;
   smartFormat: boolean;
   profanityFilter: boolean;
+  /** Speaker identification mode — optional for backwards compatibility */
+  idMode?: IdentificationMode;
 }
