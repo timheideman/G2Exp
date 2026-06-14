@@ -70,6 +70,18 @@ export type CaptureState =
   | 'no-audio' // connected but no audio detected for a while
   | 'error'; // server/STT error — captions are NOT flowing
 
+/**
+ * One unwrapped speaker turn for the G2 text container (which wraps itself).
+ * Full-width: we do NOT pre-break the text.
+ */
+export interface CaptionTurn {
+  speaker: number;
+  tag: string | null;
+  isCurrentSpeaker: boolean;
+  finalText: string;
+  interimText: string;
+}
+
 /** The complete, ready-to-render caption state. */
 export interface CaptionFrame {
   lines: CaptionLine[];
@@ -256,6 +268,43 @@ export class CaptionEngine {
     // Keep only the most recent `maxLines` — the stable viewport.
     const visible = allLines.slice(-this.config.maxLines);
     return { lines: visible };
+  }
+
+  /**
+   * Build the rolling window as UNWRAPPED turns — one entry per speaker turn,
+   * words joined into a single string. For the real G2 text container, which
+   * word-wraps at the panel edge itself: we must NOT pre-wrap (that forces
+   * early line breaks and leaves the right side empty). We bound the window by
+   * an approximate visual-line budget so the firmware shows the most recent
+   * content without overflowing.
+   */
+  buildTurns(approxCharsPerLine: number, maxVisualLines: number): CaptionTurn[] {
+    const turns: CaptionTurn[] = [];
+    for (const seg of this.segments) {
+      const finals = seg.finalWords.join(' ');
+      const interims = seg.interimWords.join(' ');
+      if (!finals && !interims) continue;
+      turns.push({
+        speaker: seg.speaker,
+        tag: seg.speaker >= 0 ? this.resolveTag(seg.speaker) : null,
+        isCurrentSpeaker: seg.speaker === this.currentSpeaker && seg.speaker >= 0,
+        finalText: finals,
+        interimText: interims,
+      });
+    }
+
+    // Trim oldest turns until the estimated wrapped-line count fits the panel.
+    const estLines = (t: CaptionTurn): number => {
+      const tagLen = t.tag ? t.tag.length + 3 : 0;
+      const chars = tagLen + t.finalText.length + (t.interimText ? t.interimText.length + 1 : 0);
+      return Math.max(1, Math.ceil(chars / Math.max(8, approxCharsPerLine)));
+    };
+    let total = turns.reduce((n, t) => n + estLines(t), 0);
+    while (turns.length > 1 && total > maxVisualLines) {
+      total -= estLines(turns[0]);
+      turns.shift();
+    }
+    return turns;
   }
 
   /** Total words currently waiting in interim tails (for pacing/diagnostics). */

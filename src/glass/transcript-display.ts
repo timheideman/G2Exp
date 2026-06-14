@@ -43,9 +43,12 @@ export class TranscriptDisplay {
   private paused = false;
   /** Live pipeline state for the always-visible status indicator. */
   private status: CaptureState = 'connecting';
+  /** Local mirror of the layout config (used to bound the glasses turn window). */
+  private config: { maxLines: number; maxLineChars: number };
 
   constructor(config?: Partial<CaptionEngineConfig>) {
     this.engine = new CaptionEngine(config);
+    this.config = { maxLines: config?.maxLines ?? 7, maxLineChars: config?.maxLineChars ?? 40 };
     // The engine resolves tags through our name resolver / letter fallback.
     this.engine.setTagResolver((idx) => this.tagFor(idx));
   }
@@ -53,6 +56,8 @@ export class TranscriptDisplay {
   /** Adjust the visible line count / wrap width / pacing at runtime. */
   setConfig(config: Partial<CaptionEngineConfig>): void {
     this.engine.setConfig(config);
+    if (config.maxLines !== undefined) this.config.maxLines = config.maxLines;
+    if (config.maxLineChars !== undefined) this.config.maxLineChars = config.maxLineChars;
   }
 
   /** Set an external name resolver for speaker display names */
@@ -140,48 +145,38 @@ export class TranscriptDisplay {
   /**
    * Format the transcript as a flat string for the G2 text container.
    *
-   * Layout rules (research-driven):
-   *  - Speaker tag `[Name]` printed only on a turn change, prefixed with a
-   *    turn marker `— ` (monochrome-safe "new speaker" cue, à la BBC dash).
-   *  - Continuation lines are indented to align under the speech.
-   *  - The still-being-recognized interim tail ends with a ` ━` cursor.
+   * KEY: the G2 firmware word-wraps the container itself, so we must NOT
+   * pre-wrap — we emit ONE full-width line per speaker turn and let the panel
+   * fill its real width. (Pre-wrapping at a guessed char count was what left the
+   * right side of the screen empty.) Each turn:
+   *  - "[Name] " tag prefix on the turn (only on speaker change).
+   *  - The whole turn's text on one logical line; the firmware wraps it.
+   *  - A trailing " ━" while the turn is still being recognized.
    */
   render(): string {
-    const frame = this.engine.buildFrame();
     const effectiveStatus: CaptureState = this.paused ? 'paused' : this.status;
 
-    if (frame.lines.length === 0) {
+    // Approx panel geometry only used to bound how many turns we keep — NOT to
+    // wrap. Generous so we don't drop content the firmware could still show.
+    const approxCharsPerLine = this.config.maxLineChars;
+    const maxVisualLines = this.config.maxLines;
+    const turns = this.engine.buildTurns(approxCharsPerLine, maxVisualLines);
+
+    if (turns.length === 0) {
       const hint = statusHint(effectiveStatus);
       return `${hint}\n\n  Speak and captions\n  will appear here.`;
     }
 
     let output = '';
-
-    // Always surface an abnormal pipeline state at the top — captioning must
-    // never fail silently. In the normal 'listening' state the flowing text is
-    // itself the signal, so we don't clutter it.
     const banner = statusBanner(effectiveStatus);
     if (banner) output += `${banner}\n`;
 
-    for (const line of frame.lines) {
-      const words = line.tokens.map((t) => t.text).join(' ');
-      const hasInterim = line.tokens.some((t) => t.state === 'interim');
-
-      // Tight labels to save horizontal space on the fixed-font panel: the
-      // speaker name is "[Name] " on a turn change (no dash marker), and
-      // continuation lines use a 2-space hang indent rather than aligning under
-      // the tag (which wasted ~7 chars of every wrapped line).
-      let prefix: string;
-      if (line.tag !== null && line.speaker >= 0) {
-        prefix = `[${line.tag}] `;
-      } else if (line.speaker >= 0) {
-        prefix = '  '; // continuation hang indent
-      } else {
-        prefix = ''; // system notice
-      }
-
-      const suffix = hasInterim ? ' ━' : '';
-      output += `${prefix}${words}${suffix}\n`;
+    for (const turn of turns) {
+      const prefix = turn.tag !== null && turn.speaker >= 0 ? `[${turn.tag}] ` : '';
+      const text = turn.interimText
+        ? `${turn.finalText}${turn.finalText ? ' ' : ''}${turn.interimText} ━`
+        : turn.finalText;
+      output += `${prefix}${text}\n`;
     }
 
     // Safety net: keep the flat string under the container ceiling.
