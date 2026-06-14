@@ -185,6 +185,14 @@ function rewrapWsOnMessage(): void {
         handleSpeakerIdentified(msg);
         return;
       }
+
+      // 2b. Speaker name withdrawn (reassigned after a diarization flip)
+      if (msg.type === 'speaker_unidentified') {
+        sessionLabels.clearIdentified(msg.speakerIndex);
+        debugLog(`↩︎ Speaker ${msg.speakerIndex} reverted to anonymous`);
+        updateSpeakersPanel();
+        return;
+      }
     } catch {
       // Binary or non-JSON — pass through
     }

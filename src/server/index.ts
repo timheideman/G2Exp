@@ -15,7 +15,7 @@ import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import type { ListenLiveClient } from '@deepgram/sdk';
 import { RealEmbeddingProvider } from './real-embedding-provider';
 import { VoiceprintStore } from './voiceprint-store';
-import { cosineSimilarity } from './speaker-matcher';
+import { SpeakerIdentityResolver } from './speaker-identity-resolver';
 
 const PORT = parseInt(process.env.WS_PORT || '8080', 10);
 const DG_API_KEY = process.env.DEEPGRAM_API_KEY;
@@ -40,9 +40,10 @@ const deepgram = createClient(DG_API_KEY, {
 const embeddingProvider = new RealEmbeddingProvider();
 
 // ─── Speaker matching constants ─────────────────────────────────────────────
-const MATCH_THRESHOLD = 0.65;   // MFCC-based embeddings on real audio — keep permissive
-const MIN_AUDIO_MS = 3000;      // Need 3s of speech before attempting match
-const MATCH_RETRY_MS = 5000;    // Don't retry a failed match within 5s
+// Identity is resolved by the SpeakerIdentityResolver (online centroids +
+// global assignment + hysteresis), not a single first-match-wins decision.
+// We embed a per-index segment once it has accumulated this much speech.
+const SEGMENT_MIN_MS = 1500;    // embed a segment after ~1.5s of that speaker's speech
 
 // ─── Ring buffer sizes ───────────────────────────────────────────────────────
 const BYTES_PER_SEC = 16000 * 2;              // 16 kHz, 16-bit
@@ -63,12 +64,11 @@ interface LoadedVoiceprint {
   embedding: number[];
 }
 
-interface SpeakerTracker {
+/** Accumulates audio for one Deepgram index until there's enough to embed. */
+interface SegmentAccumulator {
   audioChunks: Uint8Array[];
   totalAudioMs: number;
-  identified: boolean;
-  lastAttemptMs: number;
-  matchedVoiceprintId: string | null;
+  embedding: Promise<void> | null; // in-flight embedding guard
 }
 
 interface RingBuffer {
@@ -181,13 +181,19 @@ wss.on('connection', (clientWs: WebSocket) => {
   // ── Per-speaker ring buffers (30s each) ─────────────────────
   const speakerRings = new Map<number, RingBuffer>();
 
-  // ── Speaker matching state ──────────────────────────────────
+  // ── Speaker identity state ──────────────────────────────────
+  // Voiceprints loaded for this session (kept for enroll/diagnostics).
   const sessionVoiceprintStore = new VoiceprintStore(
     `/tmp/session-vp-${Math.random().toString(36).slice(2)}.json`,
   );
-  const speakerTrackers = new Map<number, SpeakerTracker>();
+  // The robust resolver: online centroids + global assignment + hysteresis.
+  const resolver = new SpeakerIdentityResolver();
+  // Per-index audio accumulators (embed once enough speech is collected).
+  const segmentAccumulators = new Map<number, SegmentAccumulator>();
+  // Last shown name we told the client, per index — to send only on change.
+  const lastShownByIndex = new Map<number, string | null>();
 
-  // ─── Speaker matching helpers ──────────────────────────────
+  // ─── Speaker identity helpers ──────────────────────────────
 
   function getSpeakerRing(speakerIndex: number): RingBuffer {
     if (!speakerRings.has(speakerIndex)) {
@@ -196,117 +202,86 @@ wss.on('connection', (clientWs: WebSocket) => {
     return speakerRings.get(speakerIndex)!;
   }
 
-  function getSpeakerTracker(speakerIndex: number): SpeakerTracker {
-    if (!speakerTrackers.has(speakerIndex)) {
-      speakerTrackers.set(speakerIndex, {
-        audioChunks: [],
-        totalAudioMs: 0,
-        identified: false,
-        lastAttemptMs: 0,
-        matchedVoiceprintId: null,
-      });
+  function getAccumulator(speakerIndex: number): SegmentAccumulator {
+    let acc = segmentAccumulators.get(speakerIndex);
+    if (!acc) {
+      acc = { audioChunks: [], totalAudioMs: 0, embedding: null };
+      segmentAccumulators.set(speakerIndex, acc);
     }
-    return speakerTrackers.get(speakerIndex)!;
+    return acc;
   }
 
-  /** Feed PCM audio for a speaker, attempting identification when ready */
+  /**
+   * Feed a chunk of one speaker's audio. Once a segment has enough speech, we
+   * embed it and feed the embedding to the resolver, which re-derives the full
+   * index→name assignment and applies hysteresis. We then notify the client of
+   * any index whose *shown* name changed (identified OR un-identified).
+   */
   function feedSpeakerAudio(
     speakerIndex: number,
     audio: Uint8Array,
     durationMs: number,
   ): void {
-    const tracker = getSpeakerTracker(speakerIndex);
+    if (sessionVoiceprintStore.size === 0) return; // nothing to match against
 
-    // Already positively identified — don't accumulate further
-    if (tracker.identified) return;
+    const acc = getAccumulator(speakerIndex);
+    acc.audioChunks.push(audio);
+    acc.totalAudioMs += durationMs;
 
-    // Rate limit: don't retry within 5s of last failed attempt
-    const sinceLastAttempt = Date.now() - tracker.lastAttemptMs;
-    if (tracker.lastAttemptMs > 0 && sinceLastAttempt < MATCH_RETRY_MS) return;
+    if (acc.totalAudioMs < SEGMENT_MIN_MS || acc.embedding) return;
 
-    tracker.audioChunks.push(audio);
-    tracker.totalAudioMs += durationMs;
-
-    // Attempt match once we have enough audio
-    if (tracker.totalAudioMs >= MIN_AUDIO_MS) {
-      attemptSpeakerMatch(speakerIndex, tracker);
-    }
-  }
-
-  /** Asynchronously extract embedding and match against voiceprints */
-  function attemptSpeakerMatch(speakerIndex: number, tracker: SpeakerTracker): void {
-    const voiceprints = sessionVoiceprintStore.getAll();
-    if (voiceprints.length === 0) return; // Nothing to match against yet
-
-    tracker.lastAttemptMs = Date.now();
-
-    // Concat all buffered audio chunks
-    const totalLen = tracker.audioChunks.reduce((s, c) => s + c.length, 0);
+    // Snapshot + reset the accumulator for the next segment.
+    const segMs = acc.totalAudioMs;
+    const totalLen = acc.audioChunks.reduce((s, c) => s + c.length, 0);
     const fullAudio = new Uint8Array(totalLen);
     let offset = 0;
-    for (const chunk of tracker.audioChunks) {
+    for (const chunk of acc.audioChunks) {
       fullAudio.set(chunk, offset);
       offset += chunk.length;
     }
+    acc.audioChunks = [];
+    acc.totalAudioMs = 0;
 
-    // Reset audio accumulator so fresh audio is collected for next attempt
-    tracker.audioChunks = [];
-    tracker.totalAudioMs = 0;
-
-    (async () => {
+    acc.embedding = (async () => {
       try {
         const embedding = await embeddingProvider.extractEmbedding(fullAudio, 16000);
-
-        // Find best match — skip voiceprints already claimed by other speakers
-        const usedIds = new Set<string>();
-        for (const [idx, t] of speakerTrackers) {
-          if (idx !== speakerIndex && t.identified && t.matchedVoiceprintId) {
-            usedIds.add(t.matchedVoiceprintId);
-          }
-        }
-
-        let bestScore = -1;
-        let bestVp: LoadedVoiceprint | null = null;
-
-        for (const vp of voiceprints) {
-          if (usedIds.has(vp.id)) continue;
-          const score = cosineSimilarity(embedding, vp.embedding);
-          if (score > bestScore) {
-            bestScore = score;
-            bestVp = { id: vp.id, name: vp.name, embedding: vp.embedding };
-          }
-        }
-
-        console.log(`🔍 Speaker ${speakerIndex} best match: "${bestVp?.name ?? 'none'}" score=${bestScore.toFixed(3)} threshold=${MATCH_THRESHOLD}`);
-
-        if (bestVp && bestScore >= MATCH_THRESHOLD) {
-          tracker.identified = true;
-          tracker.matchedVoiceprintId = bestVp.id;
-
-          console.log(
-            `🎤 Speaker ${speakerIndex} identified as "${bestVp.name}" (confidence=${bestScore.toFixed(3)})`,
-          );
-
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(
-              JSON.stringify({
-                type: 'speaker_identified',
-                speakerIndex,
-                name: bestVp.name,
-                voiceprintId: bestVp.id,
-                confidence: bestScore,
-              }),
-            );
-          }
-        } else {
-          console.log(
-            `🎤 Speaker ${speakerIndex} not matched (best score=${bestScore.toFixed(3)})`,
-          );
-        }
+        // Weight evidence by the voiced duration of the segment (seconds).
+        const view = resolver.observe(speakerIndex, embedding, segMs / 1000);
+        emitIdentityChanges(view);
       } catch (err) {
-        console.error(`[SpeakerMatch] Error matching speaker ${speakerIndex}:`, err);
+        console.error(`[SpeakerId] Error embedding speaker ${speakerIndex}:`, err);
+      } finally {
+        acc.embedding = null;
       }
     })();
+  }
+
+  /** Send speaker_identified / speaker_unidentified only when a name changes. */
+  function emitIdentityChanges(view: ReturnType<SpeakerIdentityResolver['current']>): void {
+    if (clientWs.readyState !== WebSocket.OPEN) return;
+    for (const id of view) {
+      const prev = lastShownByIndex.get(id.speakerIndex) ?? null;
+      if (id.shownName === prev) continue;
+      lastShownByIndex.set(id.speakerIndex, id.shownName);
+
+      if (id.shownName) {
+        console.log(`🎤 Speaker ${id.speakerIndex} → "${id.shownName}" (conf=${id.confidence.toFixed(2)})`);
+        clientWs.send(JSON.stringify({
+          type: 'speaker_identified',
+          speakerIndex: id.speakerIndex,
+          name: id.shownName,
+          voiceprintId: id.assignedVoiceprintId,
+          confidence: id.confidence,
+        }));
+      } else {
+        // Name was withdrawn (e.g. reassigned to another index after a flip).
+        console.log(`🎤 Speaker ${id.speakerIndex} → unidentified`);
+        clientWs.send(JSON.stringify({
+          type: 'speaker_unidentified',
+          speakerIndex: id.speakerIndex,
+        }));
+      }
+    }
   }
 
   // ─── Deepgram management ─────────────────────────────────────
@@ -330,7 +305,7 @@ wss.on('connection', (clientWs: WebSocket) => {
       smart_format: cfg.smartFormat,
       diarize: true,
       interim_results: true,
-      utterance_end_ms: 1000,  // was 2000 — finalise segments faster in conversation
+      utterance_end_ms: 1000,  // min useful value; interims arrive ~every 1s
       vad_events: true,
       profanity_filter: cfg.profanityFilter,
       encoding: 'linear16',
@@ -338,7 +313,11 @@ wss.on('connection', (clientWs: WebSocket) => {
       channels: 1,
       multichannel: false,
       no_delay: true,
-      endpointing: 150,        // was 300 — detect speaker transitions faster
+      // 300ms is Deepgram's recommended conversational range. The previous
+      // 150ms over-fragmented finals and gave the diarizer less contiguous
+      // per-segment context, destabilizing speaker indices. Captions still
+      // update fast via interims; only finalized segments wait ~150ms longer.
+      endpointing: 300,
     });
 
     dgConnection.on(LiveTranscriptionEvents.Open, () => {
@@ -461,14 +440,10 @@ wss.on('connection', (clientWs: WebSocket) => {
     }
 
     for (const [speakerIndex, ranges] of speakerRanges) {
-      const tracker = getSpeakerTracker(speakerIndex);
-      if (tracker.identified) continue;
-
-      const sinceLastAttempt = Date.now() - tracker.lastAttemptMs;
-      if (tracker.lastAttemptMs > 0 && sinceLastAttempt < MATCH_RETRY_MS) continue;
-
+      // Always keep filling the per-speaker ring (used for enroll_from_buffer),
+      // and feed the identity pipeline. The resolver decides identity — there's
+      // no "already identified, stop" short-circuit, so a flipped index recovers.
       const speakerRing = getSpeakerRing(speakerIndex);
-      let extractedMs = 0;
       let nullCount = 0;
 
       for (const range of ranges) {
@@ -476,21 +451,13 @@ wss.on('connection', (clientWs: WebSocket) => {
         if (!audio || audio.length < 2) { nullCount++; continue; }
 
         const durationMs = (range.end - range.start) * 1000;
-        extractedMs += durationMs;
         writeRingBuffer(speakerRing, audio);
-        tracker.audioChunks.push(audio);
-        tracker.totalAudioMs += durationMs;
+        // Feed the identity pipeline (accumulates, embeds, resolves).
+        feedSpeakerAudio(speakerIndex, audio, durationMs);
       }
 
       if (nullCount > 0) {
         console.log(`⚠️  Speaker ${speakerIndex}: ${nullCount}/${ranges.length} word ranges returned null (ring=${globalRing.totalBytesWritten}B, offset=${ringBytesAtDgOpen}B)`);
-      }
-      if (extractedMs > 0) {
-        console.log(`🎙 Speaker ${speakerIndex}: +${extractedMs.toFixed(0)}ms audio, total=${tracker.totalAudioMs.toFixed(0)}ms / ${MIN_AUDIO_MS}ms needed`);
-      }
-
-      if (tracker.totalAudioMs >= MIN_AUDIO_MS) {
-        attemptSpeakerMatch(speakerIndex, tracker);
       }
     }
   }
@@ -674,14 +641,12 @@ wss.on('connection', (clientWs: WebSocket) => {
 
           console.log(`👤 Loaded ${voiceprints.length} voiceprints for session`);
 
-          // Clear identification state so we can re-match with new voiceprints
-          for (const [, tracker] of speakerTrackers) {
-            if (!tracker.identified) {
-              tracker.audioChunks = [];
-              tracker.totalAudioMs = 0;
-              tracker.lastAttemptMs = 0;
-            }
-          }
+          // Hand the voiceprints to the resolver. It keeps the per-index voice
+          // centroids it has already built, so voices heard before enrollment
+          // get re-scored on the next segment and can be identified immediately.
+          resolver.setVoiceprints(
+            voiceprints.map((v) => ({ id: v.id, name: v.name, embedding: v.embedding })),
+          );
           break;
         }
 

@@ -29,6 +29,15 @@ export class SessionLabels {
   }
 
   /**
+   * Withdraw a server-resolved identification for a speaker index. Called when
+   * the resolver reassigns a name to another index (e.g. after a diarization
+   * flip) — showing a stale duplicate name is worse than reverting to a letter.
+   */
+  clearIdentified(speakerIndex: number): void {
+    this.identifiedNames.delete(speakerIndex);
+  }
+
+  /**
    * Apply a server-resolved speaker identification.
    *
    * Called when the server sends a `speaker_identified` message after
