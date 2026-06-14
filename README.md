@@ -75,26 +75,41 @@ See [docs/SPEAKER_ID.md](docs/SPEAKER_ID.md) for the speaker-identification desi
 
 ## Display Format
 
-On the 576×288 pixel G2 display (green monochrome), a stable 3-line window:
+On the 576×288 pixel G2 display (green monochrome), captions fill the full
+canvas, one speaker turn at a time:
 ```
-— [Tim] did you want to grab
-        lunch at that new place
-— [Sarah] yeah let me check my
-          calendar ▌
+[Tim] so did you want to grab lunch at
+that new place near the office today
+[Sarah] yeah let me check my calendar i
+think i am free after two ▌
 ```
 
-- `— [Name]` = turn marker + speaker, shown once per turn. The **current**
-  speaker is rendered brighter/bold (the only attribution channel on a
-  monochrome display); known contacts show their name, unknown voices a letter
-- `▌` = the live, still-being-recognized tail (rendered dimmer than finalized
-  text, with a blinking cursor)
-- Finalized words **never reflow** — only the live tail changes, so text doesn't
-  shuffle under your eyes (the #1 cause of HUD caption fatigue)
-- Latest text anchored at the bottom; oldest rolls off the top
+- `[Name]` = speaker, shown once per turn. The **current** speaker is rendered
+  brighter/bold in the simulator (the only attribution channel on a monochrome
+  display); known contacts show their name, unknown voices a letter.
+- `▌` = the live, still-being-recognized tail.
+- **The G2 firmware word-wraps to the panel edge itself** — the app emits one
+  full-width line per turn and does NOT pre-wrap (pre-wrapping at a guessed char
+  count was what left the right side of the lens empty).
+- Latest text anchored at the bottom; oldest turns roll off the top.
+
+> **Display constraints (verified against the SDK + on-device):** the G2 has a
+> single fixed firmware font — **no size/weight/family control**, and bitmaps
+> are too slow/size-capped for live captions. So "use the screen" means filling
+> the full-width text container with the fixed font, not changing font size.
 
 The caption engine (`src/glass/caption-engine.ts`) is pure and unit-tested; the
 rendering/UX choices are grounded in published research on live captions for
 deaf/hard-of-hearing readers on heads-up displays.
+
+## Testing on real glasses (dev loop)
+
+```bash
+npm run dev                                   # server :8080 + Vite client :5173
+npx evenhub qr --url "http://<LAN-IP>:5173"   # phone + laptop on same Wi-Fi
+```
+In the Even phone app → **Even Hub** tab → **Scan QR**. The app renders on the
+glasses within ~1s. See `HANDOFF.md` for the full runbook and failure table.
 
 ## G2 Controls
 
