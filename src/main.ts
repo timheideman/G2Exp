@@ -855,6 +855,38 @@ initNameAlertSettings();
 (window as any).__cal = () => app.showCalibrationGrid();
 (window as any).__fit = (lines: number, chars: number) => app.applyCaptionConfig(lines, chars);
 
+// Companion-UI calibration controls (more reliable than the WebView console).
+function initCalibrationControls(): void {
+  const btnCal = document.getElementById('btn-calibrate');
+  const btnApply = document.getElementById('btn-apply-fit');
+  const linesInput = document.getElementById('fit-lines') as HTMLInputElement | null;
+  const charsInput = document.getElementById('fit-chars') as HTMLInputElement | null;
+  const status = document.getElementById('fit-status');
+
+  // Restore any saved layout into the inputs.
+  try {
+    const saved = localStorage.getItem('captionConfig');
+    if (saved && linesInput && charsInput) {
+      const cfg = JSON.parse(saved);
+      if (cfg.maxLines) linesInput.value = String(cfg.maxLines);
+      if (cfg.maxLineChars) charsInput.value = String(cfg.maxLineChars);
+    }
+  } catch {}
+
+  btnCal?.addEventListener('click', () => {
+    app.showCalibrationGrid();
+    if (status) status.textContent = 'Ruler on glasses — count lines + chars, then Apply.';
+  });
+
+  btnApply?.addEventListener('click', () => {
+    const lines = Math.max(2, Math.min(14, parseInt(linesInput?.value || '7', 10)));
+    const chars = Math.max(12, Math.min(60, parseInt(charsInput?.value || '38', 10)));
+    app.applyCaptionConfig(lines, chars);
+    if (status) status.textContent = `Set to ${lines} lines × ${chars} chars (saved).`;
+  });
+}
+initCalibrationControls();
+
 app.init().then(() => {
   console.log('[LiveCaption] Ready');
   // Initial WS wrap (may already be connected at this point)

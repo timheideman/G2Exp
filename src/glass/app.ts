@@ -67,6 +67,9 @@ export class LiveCaptionApp {
 
   /** Live-tunable caption layout override (set by the calibration screen). */
   private captionConfigOverride: { maxLines: number; maxLineChars: number } | null = null;
+  /** While true, the calibration ruler holds the screen (normal renders suppressed). */
+  private calibrationActive = false;
+  private calibrationTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Coalesces glasses display pushes to the BLE-safe rate (newest-wins). */
   private glassesThrottle = new DisplayThrottle(
@@ -239,7 +242,7 @@ export class LiveCaptionApp {
    * number is the line index. Whatever the last fully-visible line number is =
    * lines-per-screen; whichever ruler column falls off the right edge = chars.
    */
-  showCalibrationGrid(): void {
+  showCalibrationGrid(seconds = 25): void {
     const ruler = '....5....10...15...20...25...30...35...40...45...50';
     const lines: string[] = [];
     for (let i = 1; i <= 14; i++) {
@@ -247,13 +250,25 @@ export class LiveCaptionApp {
       lines.push(`${n}${ruler}`);
     }
     const grid = lines.join('\n');
+
+    // Latch: suppress normal caption/status renders so an incoming caption
+    // doesn't immediately overwrite the ruler (the reason it "wasn't showing").
+    this.calibrationActive = true;
+    if (this.calibrationTimer) clearTimeout(this.calibrationTimer);
+
     if (this.mode === 'glasses') {
       this.glassesThrottle.cancel();
       this.updateGlassesDisplay(grid);
     } else if (this.displaySim) {
       this.displaySim.update(grid);
     }
-    console.log('[LiveCaption] Calibration grid shown — count visible lines and the last readable ruler number.');
+    console.log(`[LiveCaption] Calibration grid shown for ${seconds}s — count visible lines and the last readable ruler number, then call __fit(lines, chars).`);
+
+    this.calibrationTimer = setTimeout(() => {
+      this.calibrationActive = false;
+      this.lastRenderedText = '';
+      this.updateDisplay();
+    }, seconds * 1000);
   }
 
   /**
@@ -426,6 +441,9 @@ export class LiveCaptionApp {
   }
 
   private updateDisplay(): void {
+    // Hold the calibration ruler on screen — don't let captions overwrite it.
+    if (this.calibrationActive) return;
+
     const text = this.display.render();
     if (text === this.lastRenderedText) return;
     this.lastRenderedText = text;

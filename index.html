@@ -362,6 +362,27 @@
           <div class="toggle" id="toggle-profanity" data-setting="profanityFilter"></div>
         </div>
       </div>
+
+      <!-- Display calibration & size (glasses) -->
+      <div class="setting-group">
+        <label>Display size (glasses)</label>
+        <div style="font-size:11px;color:#555;margin-bottom:8px;line-height:1.5;">
+          Tap <strong style="color:#888">Calibrate</strong> to show a numbered ruler on the
+          glasses. Count the highest visible line number and the last readable column
+          number, then set them below.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button class="btn" id="btn-calibrate" style="font-size:12px;padding:6px 14px;">📐 Calibrate</button>
+          <span style="font-size:12px;color:#666;">Lines</span>
+          <input id="fit-lines" type="number" min="2" max="14" value="7"
+            style="width:48px;background:#1a1a1a;border:1px solid #333;border-radius:4px;color:#ccc;padding:4px 6px;font-size:13px;" />
+          <span style="font-size:12px;color:#666;">Chars</span>
+          <input id="fit-chars" type="number" min="12" max="60" value="38"
+            style="width:48px;background:#1a1a1a;border:1px solid #333;border-radius:4px;color:#ccc;padding:4px 6px;font-size:13px;" />
+          <button class="btn" id="btn-apply-fit" style="font-size:12px;padding:6px 14px;">Apply</button>
+        </div>
+        <div id="fit-status" style="font-size:11px;color:#666;margin-top:6px;min-height:14px;"></div>
+      </div>
     </div>
   </div>
 

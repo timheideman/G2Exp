@@ -53,6 +53,10 @@ createEmbeddingProvider()
 // We embed a per-index segment once it has accumulated this much speech.
 const SEGMENT_MIN_MS = 1500;    // embed a segment after ~1.5s of that speaker's speech
 
+// Coalesce mic frames to ~50ms before forwarding to Deepgram (16kHz·16-bit·mono
+// → 1600 bytes/50ms). Stays in DG's recommended 20–100ms buffer band.
+const DG_SEND_BATCH_BYTES = 1600;
+
 // ─── Ring buffer sizes ───────────────────────────────────────────────────────
 const BYTES_PER_SEC = 16000 * 2;              // 16 kHz, 16-bit
 const GLOBAL_RING_BYTES = BYTES_PER_SEC * 35; // 35s global buffer (for time-range extraction)
@@ -178,6 +182,9 @@ wss.on('connection', (clientWs: WebSocket) => {
   let isDeepgramOpen = false;
   let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   let audioChunkCount = 0;
+  // Deepgram send-coalescing buffer (batches ~10ms frames into ~50ms packets).
+  let dgSendBuffer: Buffer[] = [];
+  let dgSendBufferBytes = 0;
   let closing = false;
 
   // ── Enrollment state ────────────────────────────────────────
@@ -323,10 +330,18 @@ wss.on('connection', (clientWs: WebSocket) => {
     dgConnection = deepgram.listen.live({
       model: DG_MODEL,
       language: cfg.language,
-      smart_format: cfg.smartFormat,
-      diarize: true,
-      interim_results: true,
-      utterance_end_ms: 1000,  // min useful value; interims arrive ~every 1s
+      // smart_format on streaming HOLDS text back — it waits for entity
+      // completion or ~3s of silence before releasing, which is why captions
+      // only appeared at sentence end. We never use it. The client's "smart
+      // formatting" toggle instead maps to punctuate + numerals, which give
+      // readable text (punctuation, digits) WITHOUT that finalization delay.
+      // This is the single biggest live-caption latency win.
+      smart_format: false,
+      punctuate: cfg.smartFormat,
+      numerals: cfg.smartFormat,
+      diarize: true,          // needed for speaker names — kept on
+      interim_results: true,  // word-by-word previews; the client renders these directly
+      utterance_end_ms: 1000, // UtteranceEnd event only; does not gate text
       vad_events: true,
       profanity_filter: cfg.profanityFilter,
       encoding: 'linear16',
@@ -334,11 +349,11 @@ wss.on('connection', (clientWs: WebSocket) => {
       channels: 1,
       multichannel: false,
       no_delay: true,
-      // 300ms is Deepgram's recommended conversational range. The previous
-      // 150ms over-fragmented finals and gave the diarizer less contiguous
-      // per-segment context, destabilizing speaker indices. Captions still
-      // update fast via interims; only finalized segments wait ~150ms longer.
-      endpointing: 300,
+      // endpointing gates only FINALS (not interim text). 200ms locks segments
+      // in reasonably fast while still giving the diarizer contiguous context
+      // for stable speaker indices (10ms would over-fragment and worsen the
+      // name-swapping). Caption text speed comes from smart_format:false above.
+      endpointing: 200,
     });
 
     dgConnection.on(LiveTranscriptionEvents.Open, () => {
@@ -500,18 +515,13 @@ wss.on('connection', (clientWs: WebSocket) => {
   }
 
   function sendAudio(data: Buffer): void {
-    // Write to global ring buffer for time-range extraction
+    // Write to global ring buffer immediately — speaker-matching timing depends
+    // on every chunk being recorded as it arrives, independent of DG batching.
     writeRingBuffer(globalRing, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
 
-    const arrayBuffer = data.buffer.slice(
-      data.byteOffset,
-      data.byteOffset + data.byteLength,
-    ) as ArrayBuffer;
-
     audioChunkCount++;
-
     if (audioChunkCount === 1) {
-      console.log('🎤 First audio chunk received');
+      console.log(`🎤 First audio chunk received (${data.byteLength} bytes)`);
     }
     if (audioChunkCount % 500 === 0) {
       console.log(`🎤 Audio chunks: ${audioChunkCount}`);
@@ -523,9 +533,28 @@ wss.on('connection', (clientWs: WebSocket) => {
       openDeepgram(config);
     }
 
-    if (isDeepgramOpen && dgConnection) {
-      dgConnection.send(arrayBuffer);
+    // Coalesce the glasses' tiny ~10ms frames into ~50ms packets before
+    // forwarding to Deepgram. Sending 100 messages/sec adds WS overhead/jitter
+    // without making interims faster (Deepgram buffers internally anyway); its
+    // recommended buffer band is 20–100ms.
+    dgSendBuffer.push(Buffer.from(data));
+    dgSendBufferBytes += data.byteLength;
+    if (dgSendBufferBytes >= DG_SEND_BATCH_BYTES) {
+      flushDgSendBuffer();
     }
+  }
+
+  function flushDgSendBuffer(): void {
+    if (dgSendBuffer.length === 0) return;
+    if (!isDeepgramOpen || !dgConnection) {
+      // Not ready yet — keep buffering (bounded by the caller cadence).
+      return;
+    }
+    const merged = Buffer.concat(dgSendBuffer);
+    dgSendBuffer = [];
+    dgSendBufferBytes = 0;
+    const ab = merged.buffer.slice(merged.byteOffset, merged.byteOffset + merged.byteLength) as ArrayBuffer;
+    dgConnection.send(ab);
   }
 
   // ─── Message handler ──────────────────────────────────────────
