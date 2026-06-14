@@ -82,7 +82,14 @@ export class EnrollmentRecorder {
     this.audio = new BrowserAudioCapture();
     this.audio.onData((pcm: Uint8Array) => {
       if (this._isEnrolling && this.sendFn) {
-        this.sendFn(pcm.buffer);
+        // Slice out exactly this chunk's bytes as a plain ArrayBuffer.
+        // pcm.buffer is ArrayBufferLike (possibly Shared / over-allocated);
+        // the WebSocket send signature wants a concrete ArrayBuffer.
+        const ab = pcm.buffer.slice(
+          pcm.byteOffset,
+          pcm.byteOffset + pcm.byteLength,
+        ) as ArrayBuffer;
+        this.sendFn(ab);
       }
     });
 

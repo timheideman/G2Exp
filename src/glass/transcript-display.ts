@@ -1,45 +1,82 @@
 /**
  * Transcript Display Manager
  *
- * Manages the rolling transcript display on G2 glasses.
- * Formats diarized transcription into a readable scrolling view
- * within the 576×288 px, ~400-500 char text container.
+ * The bridge between the transcription stream and what the wearer reads.
+ * Owns a CaptionEngine (the stabilized, research-driven layout core) and
+ * exposes:
+ *
+ *  - render(): string — a flat string for the G2 text container and the
+ *    simple preview, with [Tag] prefixes, turn markers and an interim cursor.
+ *    Kept for backward compatibility and the on-glasses renderer.
+ *
+ *  - renderFrame(): CaptionFrame — the structured model the DisplaySimulator
+ *    uses to render monochrome-safe emphasis (current speaker brighter, interim
+ *    dimmer) without re-parsing strings.
+ *
+ * Why a stable engine matters: live captions that reflow/jump under the
+ * reader's gaze cause fatigue and hurt comprehension for DHH users
+ * (Liu et al. CHI 2023; Olwal et al. UIST 2020). The engine guarantees
+ * finalized words never move; only the trailing interim tail changes.
  */
 
-import type { TranscriptLine, SpeakerLabel } from '../types/transcript';
+import type { SpeakerLabel } from '../types/transcript';
+import {
+  CaptionEngine,
+  type CaptionFrame,
+  type CaptionEngineConfig,
+  type CaptureState,
+} from './caption-engine';
 
-// G2 display constraints
-const MAX_CHARS = 900;          // Stay under 1000 char limit with margin
-const MAX_LINES_STORED = 50;    // Rolling buffer of transcript lines
+// G2 display constraints (research-validated):
+//   576×288 px canvas, ~25–30 chars/line at the default font, a few lines.
+const MAX_CHARS = 900;          // Hard ceiling on the flat string for the container
 const SPEAKER_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
+/** Turn-change marker printed before a new speaker's tag (monochrome-safe). */
+const TURN_MARKER = '— ';
+
 export class TranscriptDisplay {
-  private lines: TranscriptLine[] = [];
-  private interimLine: TranscriptLine | null = null;
+  private engine: CaptionEngine;
   private speakerLabels: Map<number, SpeakerLabel> = new Map();
   private nextSpeakerIndex = 0;
   /** Optional external name resolver (from SessionLabels) */
   private nameResolver: ((speakerIndex: number) => string) | null = null;
   /** Whether transcription is currently paused */
-  private paused: boolean = false;
+  private paused = false;
+  /** Live pipeline state for the always-visible status indicator. */
+  private status: CaptureState = 'connecting';
+
+  constructor(config?: Partial<CaptionEngineConfig>) {
+    this.engine = new CaptionEngine(config);
+    // The engine resolves tags through our name resolver / letter fallback.
+    this.engine.setTagResolver((idx) => this.tagFor(idx));
+  }
+
+  /** Adjust the visible line count / wrap width / pacing at runtime. */
+  setConfig(config: Partial<CaptionEngineConfig>): void {
+    this.engine.setConfig(config);
+  }
 
   /** Set an external name resolver for speaker display names */
   setNameResolver(resolver: (speakerIndex: number) => string): void {
     this.nameResolver = resolver;
   }
 
-  /**
-   * Mark the display as paused or active.
-   * When paused, render() appends a "⏸ Paused" marker that the display
-   * simulator can pick up for overlay rendering.
-   */
   setPaused(paused: boolean): void {
     this.paused = paused;
   }
 
-  /** Whether the display is currently in paused state */
   get isPaused(): boolean {
     return this.paused;
+  }
+
+  /** Update the live capture/pipeline state shown in the status indicator. */
+  setStatus(status: CaptureState): void {
+    this.status = status;
+  }
+
+  get captureStatus(): CaptureState {
+    return this.status;
   }
 
   /** Get or create a label for a speaker index */
@@ -47,11 +84,7 @@ export class TranscriptDisplay {
     let label = this.speakerLabels.get(speakerIndex);
     if (!label) {
       const letter = SPEAKER_LETTERS[this.nextSpeakerIndex % SPEAKER_LETTERS.length];
-      label = {
-        index: speakerIndex,
-        name: `Speaker ${letter}`,
-        letter,
-      };
+      label = { index: speakerIndex, name: `Speaker ${letter}`, letter };
       this.speakerLabels.set(speakerIndex, label);
       this.nextSpeakerIndex++;
     }
@@ -60,80 +93,100 @@ export class TranscriptDisplay {
 
   /** Allow user to rename a speaker */
   renameSpeaker(speakerIndex: number, name: string): void {
-    const label = this.getLabel(speakerIndex);
-    label.name = name;
+    this.getLabel(speakerIndex).name = name;
   }
+
+  /** Resolve the short tag for a speaker (name resolver wins, else letter). */
+  private tagFor(speakerIndex: number): string {
+    if (speakerIndex < 0) return '';
+    const label = this.getLabel(speakerIndex);
+    if (this.nameResolver) {
+      const resolved = this.nameResolver(speakerIndex);
+      if (resolved) return resolved;
+    }
+    return label.letter;
+  }
+
+  // ─── Ingest ────────────────────────────────────────────────────
 
   /** Add a finalized transcript line */
   addFinal(speaker: number, text: string): void {
-    // Ensure speaker is registered
-    this.getLabel(speaker);
-
-    // If last line is same speaker, append to it
-    const lastLine = this.lines[this.lines.length - 1];
-    if (lastLine && lastLine.speaker === speaker && lastLine.isFinal) {
-      lastLine.text += ' ' + text;
+    if (speaker >= 0) this.getLabel(speaker);
+    if (speaker < 0) {
+      this.engine.addNotice(text);
     } else {
-      this.lines.push({ speaker, text, isFinal: true });
-    }
-
-    // Trim rolling buffer
-    if (this.lines.length > MAX_LINES_STORED) {
-      this.lines = this.lines.slice(-MAX_LINES_STORED);
-    }
-
-    // Clear interim if it matches
-    if (this.interimLine && this.interimLine.speaker === speaker) {
-      this.interimLine = null;
+      this.engine.addFinal(speaker, text);
     }
   }
 
   /** Update the current interim (not yet finalized) transcript */
   updateInterim(speaker: number, text: string): void {
-    this.interimLine = { speaker, text, isFinal: false };
+    if (speaker >= 0) this.getLabel(speaker);
+    this.engine.updateInterim(speaker, text);
   }
 
   /** Signal an utterance end — finalize any hanging interim */
   onUtteranceEnd(): void {
-    if (this.interimLine) {
-      this.addFinal(this.interimLine.speaker, this.interimLine.text);
-      this.interimLine = null;
-    }
+    this.engine.onUtteranceEnd();
   }
 
-  /** Format the transcript for G2 text container display */
+  // ─── Render ────────────────────────────────────────────────────
+
+  /** The structured frame for rich (monochrome-emphasis) rendering. */
+  renderFrame(): CaptionFrame {
+    const frame = this.engine.buildFrame();
+    frame.status = this.paused ? 'paused' : this.status;
+    return frame;
+  }
+
+  /**
+   * Format the transcript as a flat string for the G2 text container.
+   *
+   * Layout rules (research-driven):
+   *  - Speaker tag `[Name]` printed only on a turn change, prefixed with a
+   *    turn marker `— ` (monochrome-safe "new speaker" cue, à la BBC dash).
+   *  - Continuation lines are indented to align under the speech.
+   *  - The still-being-recognized interim tail ends with a ` ━` cursor.
+   */
   render(): string {
-    const allLines = [...this.lines];
-    if (this.interimLine) {
-      allLines.push(this.interimLine);
+    const frame = this.engine.buildFrame();
+    const effectiveStatus: CaptureState = this.paused ? 'paused' : this.status;
+
+    if (frame.lines.length === 0) {
+      const hint = statusHint(effectiveStatus);
+      return `${hint}\n\n  Speak and captions\n  will appear here.`;
     }
 
-    if (allLines.length === 0) {
-      return '  Listening...\n\n  Speak and captions\n  will appear here.';
-    }
-
-    // Build display string, most recent at bottom
     let output = '';
-    let lastSpeaker = -1;
 
-    for (const line of allLines) {
-      const label = this.getLabel(line.speaker);
-      // Use external name resolver if available, else fall back to letter
-      const tag = this.nameResolver && line.speaker >= 0
-        ? this.nameResolver(line.speaker)
-        : label.letter;
-      const prefix = line.speaker !== lastSpeaker ? `[${tag}] ` : '    ';
-      const suffix = line.isFinal ? '' : ' ━'; // Blinking cursor for interim
-      const lineText = `${prefix}${line.text}${suffix}\n`;
-      output += lineText;
-      lastSpeaker = line.speaker;
+    // Always surface an abnormal pipeline state at the top — captioning must
+    // never fail silently. In the normal 'listening' state the flowing text is
+    // itself the signal, so we don't clutter it.
+    const banner = statusBanner(effectiveStatus);
+    if (banner) output += `${banner}\n`;
+
+    for (const line of frame.lines) {
+      const words = line.tokens.map((t) => t.text).join(' ');
+      const hasInterim = line.tokens.some((t) => t.state === 'interim');
+
+      let prefix: string;
+      if (line.tag !== null && line.speaker >= 0) {
+        prefix = `${TURN_MARKER}[${line.tag}] `;
+      } else if (line.speaker >= 0) {
+        prefix = '    '; // continuation indent
+      } else {
+        prefix = ''; // system notice
+      }
+
+      const suffix = hasInterim ? ' ━' : '';
+      output += `${prefix}${words}${suffix}\n`;
     }
 
-    // Trim from the top if too long — keep most recent text visible
+    // Safety net: keep the flat string under the container ceiling.
     while (output.length > MAX_CHARS) {
-      const firstNewline = output.indexOf('\n');
-      if (firstNewline === -1) break;
-      output = output.slice(firstNewline + 1);
+      const nl = output.indexOf('\n');
+      if (nl === -1) break;
+      output = output.slice(nl + 1);
     }
 
     return output;
@@ -146,9 +199,43 @@ export class TranscriptDisplay {
 
   /** Clear all transcript data */
   clear(): void {
-    this.lines = [];
-    this.interimLine = null;
+    this.engine.clear();
     this.speakerLabels.clear();
     this.nextSpeakerIndex = 0;
+  }
+}
+
+/** Placeholder shown on the empty screen, reflecting the live state. */
+function statusHint(status: CaptureState): string {
+  switch (status) {
+    case 'listening':
+      return '  ● Listening…';
+    case 'connecting':
+      return '  ◌ Connecting…';
+    case 'paused':
+      return '  ⏸ Paused';
+    case 'no-audio':
+      return '  ◌ No audio — check mic';
+    case 'error':
+      return '  ✕ Captioning unavailable';
+  }
+}
+
+/**
+ * One-line banner for an ABNORMAL state, drawn above active captions.
+ * Returns '' for the normal 'listening' state (flowing text is the signal).
+ */
+function statusBanner(status: CaptureState): string {
+  switch (status) {
+    case 'listening':
+      return '';
+    case 'connecting':
+      return '◌ reconnecting…';
+    case 'paused':
+      return '⏸ paused';
+    case 'no-audio':
+      return '◌ no audio';
+    case 'error':
+      return '✕ captioning unavailable';
   }
 }

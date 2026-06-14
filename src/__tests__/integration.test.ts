@@ -35,7 +35,10 @@ describe('Full Pipeline Integration', () => {
       minAudioMs: 3000,
       embeddingDim: 192,
     });
-    display = new TranscriptDisplay();
+    // Wide window so multi-turn flow assertions stay within the viewport and
+    // sentences don't wrap mid-string. (The 3-line rolling window and wrapping
+    // are exercised in caption-engine.test.ts.)
+    display = new TranscriptDisplay({ maxLines: 20, maxLineChars: 80 });
   });
 
   it('end-to-end: enroll → transcribe → identify → display with names', async () => {

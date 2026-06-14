@@ -2,9 +2,18 @@
  * DisplaySimulator — Renders G2 glasses display in the browser
  *
  * Creates a 576×288 canvas that mimics the G2 micro-LED display
- * (green text on black, monospace font, 4-bit greyscale aesthetic).
- * Used for testing without physical glasses.
+ * (green text on black, ~4-bit greyscale aesthetic). Used for testing
+ * without physical glasses, and as the live preview in the companion UI.
+ *
+ * Two render paths:
+ *  - update(text): legacy flat-string path (still used by the glasses bridge).
+ *  - renderCaptionFrame(frame): the rich path that applies monochrome-safe
+ *    emphasis — current speaker tag brighter/bold, interim (still-changing)
+ *    text dimmer than finalized text — the only attribution channels available
+ *    on a green-on-black display (SpeechCompass CHI 2025; Olwal UIST 2020).
  */
+
+import type { CaptionFrame } from './caption-engine';
 
 /** Map font size names to pixel values */
 const FONT_SIZE_MAP: Record<'small' | 'medium' | 'large', number> = {
@@ -13,11 +22,40 @@ const FONT_SIZE_MAP: Record<'small' | 'medium' | 'large', number> = {
   large: 24,
 };
 
+/** Turn-change marker drawn before a new speaker's tag (monochrome dash cue). */
+const TURN_MARKER = '— ';
+
+/** Greyscale-green palette — the only attribution channel on this display. */
+const SIM_COLORS = {
+  final: 'rgb(0, 220, 90)', // bright — finalized, settled text
+  interim: 'rgb(0, 120, 55)', // dim — still-changing tail
+  tagCurrent: 'rgb(120, 255, 150)', // brightest — active speaker tag
+  tagPast: 'rgb(0, 150, 70)', // muted — prior speaker tag
+} as const;
+
+/** One styled run of text within a drawn row. */
+interface DrawSegment {
+  text: string;
+  color: string;
+  glow: number;
+  bold: boolean;
+}
+
+/** One physical row on the panel (after pixel wrapping). */
+interface DrawRow {
+  segments: DrawSegment[];
+  /** Left indent in px (continuation rows align under the speech). */
+  indent: number;
+  /** Whether a blinking interim cursor trails this row. */
+  cursor: boolean;
+}
+
 export class DisplaySimulator {
   private canvas: HTMLCanvasElement;
   private ctx!: CanvasRenderingContext2D;
   private scale: number;
   private currentText = '';
+  private currentFrame: CaptionFrame | null = null;
   private animFrame: number | null = null;
   private fontSize: number = FONT_SIZE_MAP.medium;
   private paused: boolean = false;
@@ -68,8 +106,7 @@ export class DisplaySimulator {
    */
   setFontSize(size: 'small' | 'medium' | 'large'): void {
     this.fontSize = FONT_SIZE_MAP[size];
-    // Re-render immediately so the change is visible right away
-    this.renderText(this.currentText);
+    this.rerender();
   }
 
   /**
@@ -78,14 +115,31 @@ export class DisplaySimulator {
    */
   setPaused(paused: boolean): void {
     this.paused = paused;
-    this.renderText(this.currentText);
+    this.rerender();
   }
 
-  /** Update the display with new text content */
+  /** Re-draw using whichever render path is currently active. */
+  private rerender(): void {
+    if (this.currentFrame) this.renderFrame(this.currentFrame);
+    else this.renderText(this.currentText);
+  }
+
+  /** Update the display with new text content (legacy flat-string path). */
   update(text: string): void {
     if (text === this.currentText) return;
     this.currentText = text;
+    this.currentFrame = null;
     this.renderText(text);
+  }
+
+  /**
+   * Rich render path: draw a structured caption frame with monochrome-safe
+   * emphasis. Current-speaker tags are brighter/bold; interim tokens are
+   * dimmer than finalized ones; a blinking cursor follows the live tail.
+   */
+  renderCaptionFrame(frame: CaptionFrame): void {
+    this.currentFrame = frame;
+    this.renderFrame(frame);
   }
 
   private renderText(text: string): void {
@@ -151,6 +205,212 @@ export class DisplaySimulator {
     if (this.paused) {
       this.drawPauseOverlay(ctx, W);
     }
+  }
+
+  /**
+   * Rich token-level renderer. Brightness encodes two things at once — the
+   * only attribution channels available on monochrome green-on-black:
+   *   • final vs interim: interim (still-changing tail) is dimmer.
+   *   • current speaker vs prior: the active speaker's tag is brightest/bold.
+   *
+   * The renderer is authoritative on width: it pixel-wraps each turn so text
+   * never overruns the panel edge (the engine's char-wrap is only a hint).
+   * Bottom-anchored: the most recent row sits at the bottom of the panel.
+   */
+  private renderFrame(frame: CaptionFrame): void {
+    const ctx = this.ctx;
+    const W = DisplaySimulator.WIDTH;
+    const H = DisplaySimulator.HEIGHT;
+
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, W, H);
+
+    const fontStack = `"SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace`;
+    ctx.textBaseline = 'top';
+
+    const lineHeight = Math.round(this.fontSize * 1.55);
+    const paddingX = 14;
+    const paddingY = 10;
+    const maxLines = Math.max(1, Math.floor((H - paddingY * 2) / lineHeight));
+    const maxWidth = W - paddingX * 2;
+
+    // Build flat draw-rows from the frame with pixel-aware wrapping.
+    const rows = this.layoutRows(frame, fontStack, maxWidth, paddingX);
+
+    // Keep only the most recent rows that fit, anchored to the bottom.
+    const visible = rows.slice(-maxLines);
+    const startY = H - paddingY - visible.length * lineHeight;
+
+    for (let i = 0; i < visible.length; i++) {
+      const row = visible[i];
+      const y = Math.max(paddingY, startY) + i * lineHeight;
+      let x = paddingX + row.indent;
+
+      for (const seg of row.segments) {
+        ctx.font = seg.bold
+          ? `bold ${this.fontSize}px ${fontStack}`
+          : `${this.fontSize}px ${fontStack}`;
+        ctx.fillStyle = seg.color;
+        ctx.shadowColor = seg.color;
+        ctx.shadowBlur = seg.glow;
+        ctx.fillText(seg.text, x, y);
+        x += ctx.measureText(seg.text).width;
+      }
+
+      // Blinking cursor at the live (interim) tail.
+      if (row.cursor) {
+        const cursorOpacity = 0.4 + 0.6 * Math.abs(Math.sin(Date.now() / 350));
+        ctx.globalAlpha = cursorOpacity;
+        ctx.fillStyle = SIM_COLORS.interim;
+        ctx.shadowBlur = 0;
+        ctx.fillText(' ▌', x, y);
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    ctx.shadowBlur = 0;
+
+    // Always-visible capture-state badge (top-right) so captioning never
+    // fails silently. The pause overlay is a special, more prominent case.
+    if (this.paused || frame.status === 'paused') {
+      this.drawPauseOverlay(ctx, W);
+    } else if (frame.status) {
+      this.drawStatusBadge(ctx, W, frame.status);
+    }
+  }
+
+  /** Small top-right capture-state dot + label. */
+  private drawStatusBadge(
+    ctx: CanvasRenderingContext2D,
+    W: number,
+    status: NonNullable<CaptionFrame['status']>,
+  ): void {
+    const map: Record<string, { dot: string; label: string; text: string }> = {
+      listening: { dot: 'rgb(0, 220, 90)', label: 'live', text: 'rgb(0, 150, 70)' },
+      connecting: { dot: 'rgb(180, 160, 0)', label: 'reconnecting', text: 'rgb(150, 130, 0)' },
+      'no-audio': { dot: 'rgb(180, 120, 0)', label: 'no audio', text: 'rgb(150, 110, 0)' },
+      error: { dot: 'rgb(220, 60, 50)', label: 'no captions', text: 'rgb(200, 70, 60)' },
+    };
+    const s = map[status];
+    if (!s) return;
+
+    const fontStack = `"SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace`;
+    const fs = Math.max(10, Math.round(this.fontSize * 0.62));
+    ctx.font = `${fs}px ${fontStack}`;
+    ctx.textBaseline = 'top';
+
+    const labelW = ctx.measureText(s.label).width;
+    const dotR = Math.max(3, Math.round(fs * 0.32));
+    const padH = 6;
+    const gap = 6;
+    const boxW = dotR * 2 + gap + labelW + padH * 2;
+    const boxH = fs + 8;
+    const boxX = W - boxW - 8;
+    const boxY = 6;
+
+    // Subtle dark chip so it reads over any caption text.
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+    ctx.globalAlpha = 1;
+
+    // Status dot (steady-pulse for connecting via the anim loop alpha).
+    const cy = boxY + boxH / 2;
+    ctx.beginPath();
+    ctx.fillStyle = s.dot;
+    ctx.shadowColor = s.dot;
+    ctx.shadowBlur = 4;
+    ctx.arc(boxX + padH + dotR, cy, dotR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = s.text;
+    ctx.fillText(s.label, boxX + padH + dotR * 2 + gap, boxY + 4);
+  }
+
+  /**
+   * Flatten a CaptionFrame into pixel-wrapped draw rows. Each turn's tag is
+   * drawn once on its first row; wrapped continuation rows are indented to
+   * align under the speech.
+   */
+  private layoutRows(
+    frame: CaptionFrame,
+    fontStack: string,
+    maxWidth: number,
+    _paddingX: number,
+  ): DrawRow[] {
+    const ctx = this.ctx;
+    const measure = (text: string, bold = false): number => {
+      ctx.font = bold ? `bold ${this.fontSize}px ${fontStack}` : `${this.fontSize}px ${fontStack}`;
+      return ctx.measureText(text).width;
+    };
+    const spaceW = measure(' ');
+    const rows: DrawRow[] = [];
+
+    for (const line of frame.lines) {
+      const isSystem = line.speaker < 0;
+
+      // Leading segments + indent for this turn's first row.
+      const lead: DrawSegment[] = [];
+      let indent = 0;
+      if (line.tag !== null && !isSystem) {
+        lead.push({ text: TURN_MARKER, color: SIM_COLORS.tagPast, glow: 0, bold: false });
+        const tagText = `[${line.tag}] `;
+        lead.push({
+          text: tagText,
+          color: line.isCurrentSpeaker ? SIM_COLORS.tagCurrent : SIM_COLORS.tagPast,
+          glow: line.isCurrentSpeaker ? 5 : 2,
+          bold: line.isCurrentSpeaker,
+        });
+        // Continuation rows of THIS turn indent under the speech.
+        indent = measure(TURN_MARKER) + measure(tagText);
+      } else if (!isSystem) {
+        // Continuation of a prior turn (engine already split it): indent.
+        indent = measure(`${TURN_MARKER}[A] `);
+      }
+
+      // Wrap tokens to pixel width, carrying the lead onto the first row.
+      // First row indent: 0 when a tag lead is present (the lead provides the
+      // offset), else the computed indent (engine-split continuation line).
+      const firstIndent = lead.length > 0 ? 0 : indent;
+      let row: DrawRow = { segments: [...lead], indent: firstIndent, cursor: false };
+      let used = (lead.length > 0 ? 0 : indent) +
+        lead.reduce((w, s) => w + measure(s.text, s.bold), 0);
+      let placedAny = lead.length > 0;
+
+      const pushRow = () => {
+        rows.push(row);
+        row = { segments: [], indent, cursor: false };
+        used = indent;
+        placedAny = false;
+      };
+
+      for (const tok of line.tokens) {
+        const isInterim = tok.state === 'interim';
+        const w = measure(tok.text);
+        const sep = placedAny ? spaceW : 0;
+
+        if (placedAny && used + sep + w > maxWidth) {
+          pushRow();
+        }
+
+        // Prepend a separating space only when this row already has content.
+        const text = placedAny ? ` ${tok.text}` : tok.text;
+        row.segments.push({
+          text,
+          color: isInterim ? SIM_COLORS.interim : SIM_COLORS.final,
+          glow: isInterim ? 2 : 4,
+          bold: false,
+        });
+        used += (placedAny ? sep : 0) + w;
+        placedAny = true;
+        row.cursor = isInterim; // last interim token wins; reset by finals
+      }
+
+      rows.push(row);
+    }
+
+    return rows;
   }
 
   /**
@@ -221,7 +481,13 @@ export class DisplaySimulator {
   /** Start cursor blink animation loop */
   startAnimation(): void {
     const tick = () => {
-      if (this.currentText.includes('━')) {
+      // Re-render only when there's a live (interim) tail to blink.
+      if (this.currentFrame) {
+        const hasInterim = this.currentFrame.lines.some((l) =>
+          l.tokens.some((t) => t.state === 'interim'),
+        );
+        if (hasInterim) this.renderFrame(this.currentFrame);
+      } else if (this.currentText.includes('━')) {
         this.renderText(this.currentText);
       }
       this.animFrame = requestAnimationFrame(tick);

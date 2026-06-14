@@ -18,7 +18,12 @@ import { DisplaySimulator } from './display-simulator';
 import { SettingsManager } from './settings-manager';
 import { ReconnectScheduler } from './settings-manager';
 import { NameAlertDetector } from './name-alert-detector';
+import { DisplayThrottle } from './display-throttle';
 import type { LiveCaptionSettings, ConfigMessage } from '../types/settings';
+import type { CaptureState } from './caption-engine';
+
+/** BLE-safe display update interval — production drivers cap at ~3/sec. */
+const GLASSES_UPDATE_INTERVAL_MS = 300;
 
 // Server URL — configurable via window global or auto-detected from current page
 // Dev  (HTTP):  ws://localhost:8080
@@ -46,6 +51,12 @@ export class LiveCaptionApp {
   private containerName = 'caption';
   private reconnectScheduler = new ReconnectScheduler();
   private lastRenderedText = '';
+
+  /** Coalesces glasses display pushes to the BLE-safe rate (newest-wins). */
+  private glassesThrottle = new DisplayThrottle(
+    (text) => this.updateGlassesDisplay(text),
+    GLASSES_UPDATE_INTERVAL_MS,
+  );
 
   readonly settings = new SettingsManager();
 
@@ -167,9 +178,20 @@ export class LiveCaptionApp {
     this.setStatus('Listening...', true);
   }
 
+  /**
+   * Push caption text to the glasses, coalesced to the BLE-safe update rate.
+   * Frequent caption frames are merged (newest-wins) so we never saturate the
+   * link or cause flicker — the display can't update faster than ~3/sec anyway.
+   */
+  private pushGlassesText(text: string): void {
+    this.glassesThrottle.push(text);
+  }
+
   private async updateGlassesDisplay(text: string): Promise<void> {
     try {
       const { TextContainerUpgrade } = this.sdk;
+      // Partial-update path (textContainerUpgrade) — the flicker-free way to
+      // refresh a text container without rebuilding the whole page.
       await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
         containerID: this.containerId,
         containerName: this.containerName,
@@ -212,10 +234,10 @@ export class LiveCaptionApp {
     if (this.browserAudio.isCapturing) {
       await this.browserAudio.stop();
       this.isListening = false;
-      this.display.addFinal(-1, '── Paused ──');
       this.display.setPaused(true);
       this.displaySim?.setPaused(true);
       this.setStatus('Paused', false);
+      this.setCaptureState('paused');
     } else {
       this.setStatus('Requesting mic access...', false);
       try {
@@ -224,9 +246,11 @@ export class LiveCaptionApp {
         this.display.setPaused(false);
         this.displaySim?.setPaused(false);
         this.setStatus('Listening (mic active)...', true);
+        this.setCaptureState('listening');
       } catch (err: any) {
         console.error('[LiveCaption] Mic error:', err);
         this.setStatus(`Mic error: ${err.message || 'denied'}`, false);
+        this.setCaptureState('error');
         return;
       }
     }
@@ -238,6 +262,7 @@ export class LiveCaptionApp {
   private connectWebSocket(): void {
     console.log(`[LiveCaption] Connecting to ${WS_URL}`);
     this.setStatus('Connecting to server...', false);
+    this.setCaptureState('connecting');
     this.ws = new WebSocket(WS_URL);
 
     this.ws.onopen = () => {
@@ -248,6 +273,7 @@ export class LiveCaptionApp {
       // Apply current font size to display
       this.displaySim?.setFontSize(this.settings.current.fontSize);
       this.setStatus(this.isListening ? 'Listening...' : 'Connected — ready', true);
+      this.setCaptureState(this.isListening ? 'listening' : 'connecting');
     };
 
     this.ws.onmessage = (event) => {
@@ -259,6 +285,13 @@ export class LiveCaptionApp {
             this.isListening ? `Listening (${lang})...` : `Connected (${lang})`,
             true,
           );
+          if (this.isListening) this.setCaptureState('listening');
+          return;
+        }
+        if (msg.type === 'error') {
+          console.error('[LiveCaption] Server error:', msg.message || msg.code);
+          this.setStatus(msg.message || 'Captioning error', false);
+          this.setCaptureState('error');
           return;
         }
         this.handleTranscript(msg);
@@ -270,11 +303,13 @@ export class LiveCaptionApp {
     this.ws.onclose = () => {
       console.log('[LiveCaption] Server disconnected');
       this.setStatus('Disconnected — reconnecting...', false);
+      this.setCaptureState('connecting');
       this.reconnectScheduler.schedule(() => this.connectWebSocket());
     };
 
     this.ws.onerror = () => {
       this.setStatus('Connection error', false);
+      this.setCaptureState('error');
     };
   }
 
@@ -290,6 +325,8 @@ export class LiveCaptionApp {
         this.display.onUtteranceEnd();
         break;
     }
+    // Transcript is flowing — we're definitively live.
+    if (this.isListening) this.display.setStatus('listening');
     this.updateDisplay();
   }
 
@@ -299,9 +336,12 @@ export class LiveCaptionApp {
     this.lastRenderedText = text;
 
     if (this.mode === 'glasses') {
-      this.updateGlassesDisplay(text);
+      // Glasses bridge accepts a flat string; throttle pushes to the
+      // BLE-safe rate so frequent caption updates don't saturate the link.
+      this.pushGlassesText(text);
     } else if (this.displaySim) {
-      this.displaySim.update(text);
+      // Browser preview gets the rich structured frame (monochrome emphasis).
+      this.displaySim.renderCaptionFrame(this.display.renderFrame());
     }
 
     if (this.onTranscriptUpdate) {
@@ -314,13 +354,15 @@ export class LiveCaptionApp {
       if (this.isListening) {
         await this.bridge!.audioControl(false);
         this.isListening = false;
-        this.display.addFinal(-1, '── Paused ──');
+        this.display.setPaused(true);
         this.setStatus('Paused', false);
+        this.setCaptureState('paused');
       } else {
-        this.display.addFinal(-1, '── Resumed ──');
         await this.bridge!.audioControl(true);
         this.isListening = true;
+        this.display.setPaused(false);
         this.setStatus('Listening...', true);
+        this.setCaptureState('listening');
       }
       this.updateDisplay();
     } else {
@@ -330,6 +372,19 @@ export class LiveCaptionApp {
 
   private setStatus(text: string, connected: boolean): void {
     if (this.onStatusChange) this.onStatusChange(text, connected);
+  }
+
+  /**
+   * Update the live capture/pipeline state shown in the always-visible
+   * status indicator (anti silent-failure), and re-render so it appears
+   * immediately even if no new caption text has arrived.
+   */
+  private setCaptureState(state: CaptureState): void {
+    if (this.display.captureStatus === state) return;
+    this.display.setStatus(state);
+    // Force a re-render: the status changed even if the caption text didn't.
+    this.lastRenderedText = '';
+    this.updateDisplay();
   }
 
 
@@ -376,8 +431,11 @@ export class LiveCaptionApp {
     const alertText = `  👋  ${label.toUpperCase()}`;
 
     if (this.mode === 'glasses') {
-      // Override glasses display temporarily
+      // Override the glasses display immediately (bypass the caption throttle —
+      // this is a high-priority interruption the wearer must see now).
+      this.glassesThrottle.cancel();
       this.updateGlassesDisplay(alertText);
+      this.lastRenderedText = ''; // force a re-render when we restore
       setTimeout(() => this.updateDisplay(), 3000);
     } else {
       // In browser mode: force-render the alert as if it were a transcript update
@@ -393,6 +451,7 @@ export class LiveCaptionApp {
 
   async destroy(): Promise<void> {
     this.reconnectScheduler.cancel();
+    this.glassesThrottle.cancel();
     this.displaySim?.destroy();
     await this.browserAudio?.stop();
     if (this.mode === 'glasses') {

@@ -417,6 +417,14 @@ wss.on('connection', (clientWs: WebSocket) => {
 
     dgConnection.on(LiveTranscriptionEvents.Error, (err) => {
       console.error('❌ Deepgram error:', err);
+      // Surface to the client so captioning never fails silently.
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({
+          type: 'error',
+          code: (err as any)?.type || 'deepgram_error',
+          message: (err as any)?.message || 'Transcription service error',
+        }));
+      }
     });
 
     dgConnection.on(LiveTranscriptionEvents.Close, () => {
