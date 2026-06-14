@@ -29,12 +29,12 @@ describe('TranscriptDisplay', () => {
       expect(display.render()).toContain('unavailable');
     });
 
-    it('renders a single speaker line with a turn marker + tag', () => {
+    it('renders a single speaker line with a tight [tag] prefix', () => {
       display.addFinal(0, 'Hello everyone');
       const output = display.render();
       expect(output).toContain('[A] Hello everyone');
-      // Turn marker precedes the tag on a speaker change
-      expect(output).toContain('— [A]');
+      // Tight label style: no dash marker before the tag (saves panel width).
+      expect(output).not.toContain('—');
     });
 
     it('renders multiple speakers with different labels', () => {

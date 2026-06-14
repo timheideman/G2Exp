@@ -25,6 +25,19 @@ import type { CaptureState } from './caption-engine';
 /** BLE-safe display update interval — production drivers cap at ~3/sec. */
 const GLASSES_UPDATE_INTERVAL_MS = 300;
 
+/**
+ * Caption layout for the real G2 text container. The firmware font is fixed
+ * (no size control), so "use the screen" means filling the 576×288 panel with
+ * the fixed font — a full-screen container holds ~400–500 chars ≈ ~12 lines ×
+ * ~35–40 chars. We target a generous, panel-filling block. These are tunable
+ * live via the on-glasses calibration screen (?cal grid) if the real unit
+ * differs from these estimates.
+ */
+const GLASSES_CAPTION_CONFIG = { maxLines: 7, maxLineChars: 38 };
+
+/** A looser layout for the browser simulator (its font is smaller/scalable). */
+const BROWSER_CAPTION_CONFIG = { maxLines: 6, maxLineChars: 44 };
+
 // Server URL — configurable via window global or auto-detected from current page
 // Dev  (HTTP):  ws://localhost:8080
 // Prod (HTTPS): wss://livecaption.astralate.com/ws
@@ -52,6 +65,9 @@ export class LiveCaptionApp {
   private reconnectScheduler = new ReconnectScheduler();
   private lastRenderedText = '';
 
+  /** Live-tunable caption layout override (set by the calibration screen). */
+  private captionConfigOverride: { maxLines: number; maxLineChars: number } | null = null;
+
   /** Coalesces glasses display pushes to the BLE-safe rate (newest-wins). */
   private glassesThrottle = new DisplayThrottle(
     (text) => this.updateGlassesDisplay(text),
@@ -68,6 +84,12 @@ export class LiveCaptionApp {
   onNameAlerted?: (label: string) => void;
 
   async init(): Promise<void> {
+    // Restore a previously-calibrated caption layout, if any.
+    try {
+      const saved = localStorage.getItem('captionConfig');
+      if (saved) this.captionConfigOverride = JSON.parse(saved);
+    } catch {}
+
     // Listen for settings changes
     this.settings.onChange((s) => this.onSettingsChanged(s));
 
@@ -134,6 +156,9 @@ export class LiveCaptionApp {
   // ─── Glasses Mode ───────────────────────────────────────────
 
   private async initGlasses(): Promise<void> {
+    // Size the caption layout to fill the real G2 panel (fixed firmware font).
+    this.display.setConfig(this.captionConfigOverride ?? GLASSES_CAPTION_CONFIG);
+
     // Hide the desktop simulator — on iPhone the real glasses display is used
     const simContainer = document.querySelector('.sim-container') as HTMLElement | null;
     if (simContainer) simContainer.style.display = 'none';
@@ -208,6 +233,45 @@ export class LiveCaptionApp {
   }
 
   /**
+   * Calibration: paint a numbered ruler on the glasses so we can read off the
+   * REAL chars-per-line and lines-per-screen of the firmware font (the ~38/~12
+   * figures are research estimates). Each row is a digit ruler; the leading
+   * number is the line index. Whatever the last fully-visible line number is =
+   * lines-per-screen; whichever ruler column falls off the right edge = chars.
+   */
+  showCalibrationGrid(): void {
+    const ruler = '....5....10...15...20...25...30...35...40...45...50';
+    const lines: string[] = [];
+    for (let i = 1; i <= 14; i++) {
+      const n = String(i).padStart(2, '0');
+      lines.push(`${n}${ruler}`);
+    }
+    const grid = lines.join('\n');
+    if (this.mode === 'glasses') {
+      this.glassesThrottle.cancel();
+      this.updateGlassesDisplay(grid);
+    } else if (this.displaySim) {
+      this.displaySim.update(grid);
+    }
+    console.log('[LiveCaption] Calibration grid shown — count visible lines and the last readable ruler number.');
+  }
+
+  /**
+   * Apply a tuned caption layout live (from the calibration screen) without a
+   * reload. Persists to localStorage so it survives the next launch.
+   */
+  applyCaptionConfig(maxLines: number, maxLineChars: number): void {
+    this.captionConfigOverride = { maxLines, maxLineChars };
+    this.display.setConfig(this.captionConfigOverride);
+    try {
+      localStorage.setItem('captionConfig', JSON.stringify(this.captionConfigOverride));
+    } catch {}
+    this.lastRenderedText = '';
+    this.updateDisplay();
+    console.log(`[LiveCaption] Caption layout set to ${maxLines} lines × ${maxLineChars} chars`);
+  }
+
+  /**
    * Push caption text to the glasses, coalesced to the BLE-safe update rate.
    * Frequent caption frames are merged (newest-wins) so we never saturate the
    * link or cause flicker — the display can't update faster than ~3/sec anyway.
@@ -236,6 +300,8 @@ export class LiveCaptionApp {
   // ─── Browser Mode ───────────────────────────────────────────
 
   private initBrowser(): void {
+    this.display.setConfig(BROWSER_CAPTION_CONFIG);
+
     const simContainer = document.getElementById('glasses-sim');
     if (simContainer) {
       this.displaySim = new DisplaySimulator(simContainer, 1);

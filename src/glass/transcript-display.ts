@@ -27,13 +27,11 @@ import {
   type CaptureState,
 } from './caption-engine';
 
-// G2 display constraints (research-validated):
-//   576×288 px canvas, ~25–30 chars/line at the default font, a few lines.
-const MAX_CHARS = 900;          // Hard ceiling on the flat string for the container
+// G2 display constraints (research-validated against the SDK):
+//   576×288 px canvas, fixed firmware font, ~35–40 chars/line × up to ~12 lines.
+//   A full-screen text container holds ~400–500 chars (≤2000 via upgrade).
+const MAX_CHARS = 1800;         // Hard ceiling on the flat string (under the 2000 upgrade limit)
 const SPEAKER_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-
-/** Turn-change marker printed before a new speaker's tag (monochrome-safe). */
-const TURN_MARKER = '— ';
 
 export class TranscriptDisplay {
   private engine: CaptionEngine;
@@ -169,11 +167,15 @@ export class TranscriptDisplay {
       const words = line.tokens.map((t) => t.text).join(' ');
       const hasInterim = line.tokens.some((t) => t.state === 'interim');
 
+      // Tight labels to save horizontal space on the fixed-font panel: the
+      // speaker name is "[Name] " on a turn change (no dash marker), and
+      // continuation lines use a 2-space hang indent rather than aligning under
+      // the tag (which wasted ~7 chars of every wrapped line).
       let prefix: string;
       if (line.tag !== null && line.speaker >= 0) {
-        prefix = `${TURN_MARKER}[${line.tag}] `;
+        prefix = `[${line.tag}] `;
       } else if (line.speaker >= 0) {
-        prefix = '    '; // continuation indent
+        prefix = '  '; // continuation hang indent
       } else {
         prefix = ''; // system notice
       }

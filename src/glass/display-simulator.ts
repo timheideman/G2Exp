@@ -22,9 +22,6 @@ const FONT_SIZE_MAP: Record<'small' | 'medium' | 'large', number> = {
   large: 24,
 };
 
-/** Turn-change marker drawn before a new speaker's tag (monochrome dash cue). */
-const TURN_MARKER = '— ';
-
 /** Greyscale-green palette — the only attribution channel on this display. */
 const SIM_COLORS = {
   final: 'rgb(0, 220, 90)', // bright — finalized, settled text
@@ -350,11 +347,12 @@ export class DisplaySimulator {
     for (const line of frame.lines) {
       const isSystem = line.speaker < 0;
 
-      // Leading segments + indent for this turn's first row.
+      // Leading segments + indent for this turn's first row. Tight label style
+      // (no dash marker, small hang indent) to match the glasses and save width.
       const lead: DrawSegment[] = [];
+      const HANG = '  ';
       let indent = 0;
       if (line.tag !== null && !isSystem) {
-        lead.push({ text: TURN_MARKER, color: SIM_COLORS.tagPast, glow: 0, bold: false });
         const tagText = `[${line.tag}] `;
         lead.push({
           text: tagText,
@@ -362,11 +360,11 @@ export class DisplaySimulator {
           glow: line.isCurrentSpeaker ? 5 : 2,
           bold: line.isCurrentSpeaker,
         });
-        // Continuation rows of THIS turn indent under the speech.
-        indent = measure(TURN_MARKER) + measure(tagText);
+        // Continuation rows of THIS turn use a small hang indent.
+        indent = measure(HANG);
       } else if (!isSystem) {
-        // Continuation of a prior turn (engine already split it): indent.
-        indent = measure(`${TURN_MARKER}[A] `);
+        // Continuation of a prior turn (engine already split it): hang indent.
+        indent = measure(HANG);
       }
 
       // Wrap tokens to pixel width, carrying the lead onto the first row.

@@ -850,10 +850,19 @@ initSpeakersPanel();
 initEnrollModal();
 initNameAlertSettings();
 
+// Expose a tiny calibration API for on-glasses screen-fit tuning, e.g. from
+// the WebView console: __cal() shows the ruler, __fit(7, 38) sets the layout.
+(window as any).__cal = () => app.showCalibrationGrid();
+(window as any).__fit = (lines: number, chars: number) => app.applyCaptionConfig(lines, chars);
+
 app.init().then(() => {
   console.log('[LiveCaption] Ready');
   // Initial WS wrap (may already be connected at this point)
   setTimeout(rewrapWsOnMessage, 100);
+  // ?cal in the URL → show the calibration ruler on launch.
+  if (new URLSearchParams(location.search).has('cal')) {
+    setTimeout(() => app.showCalibrationGrid(), 600);
+  }
 }).catch((err) => {
   console.error('[LiveCaption] Failed to initialize:', err);
   if (statusEl) {
