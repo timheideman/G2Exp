@@ -2,71 +2,66 @@
 
 > **⚠️ AGENT INSTRUCTION:** When this file is loaded, present the TODO list to Tim before taking any action. Ask what he wants to tackle.
 
+## 🔴 Needs hardware to verify
+
+These are built and unit-tested but should be confirmed on physical G2 glasses:
+
+- [ ] Caption rendering on the real 576×288 display — confirm the 3-line window,
+      turn markers, current-speaker brightness/bold, and interim dimming look
+      right (font metrics differ from the simulator).
+- [ ] BLE update throttle (~300ms) — confirm no flicker/saturation when captions
+      stream fast; tune `GLASSES_UPDATE_INTERVAL_MS` if needed.
+- [ ] Capture-state badge legibility on-device (live / reconnecting / error).
+- [ ] End-to-end latency profiling (mic → glasses), and whether `endpointing:300`
+      feels right for conversation.
+- [ ] Speaker-ID accuracy with real voices in a real room (MFCC default).
+
 ## 🟡 Should Have
 
-### Hardware Testing
-- [ ] Test full app on physical G2 glasses (even Hub dev mode + evenhub qr)
-- [ ] Verify word-wrapping on actual G2 display (font metrics may differ from simulator)
-- [ ] Performance profiling: audio latency end-to-end (mic → glasses display)
-- [ ] Even Hub simulator testing
-
-### Display
-- [ ] "Privacy mode" quick toggle on glasses (double-tap to switch Anonymous ↔ Contacts)
+- [ ] **Verify + enable the ONNX neural embedder** on the VPS — download the
+      WeSpeaker model, set `EMBEDDER=onnx`, and run the offline torchaudio fbank
+      cross-check (see docs/SPEAKER_ID.md) before trusting it in production.
+- [ ] "Privacy mode" quick toggle on glasses (double-tap variant to switch
+      Anonymous ↔ Contacts).
+- [ ] User-adjustable line count (2 vs 3) and scroll/reveal preference — DHH
+      preference is genuinely split; customization is a near-universal ask.
 
 ## 🟢 Nice to Have
 
-### Production
-- [ ] Deploy to VPS (follow DEPLOY_PLAN.md — DNS, systemd service, Caddy config)
-
-### Future Features
-- [ ] Multi-language auto-detect (let Deepgram pick language instead of manual selection)
-- [ ] Transcript history / session log (exportable)
-- [ ] Companion app notification when new speaker identified
-- [ ] Whisper fallback for offline/low-connectivity scenarios
+- [ ] Deploy to VPS (DEPLOY_PLAN.md — DNS, systemd, Caddy).
+- [ ] Multi-language auto-detect (let Deepgram pick the language).
+- [ ] Transcript history / session log (exportable).
+- [ ] Non-speech cues in captions (`[laughter]`, `[music]`) — WCAG-valued.
+- [ ] Passive/continuous enrollment — refine voiceprints from high-confidence,
+      single-speaker, quality-gated conversation segments.
+- [ ] Whisper / on-device STT fallback for offline / low-connectivity.
 
 ## ✅ Done
 
-### Foundation
-- [x] Project scaffolding (Vite + TypeScript + vitest)
-- [x] WebSocket proxy server with Deepgram integration
-- [x] G2 glasses app (audio capture, display rendering, double-tap pause)
-- [x] Browser fallback (mic capture, display simulator, settings panel)
-- [x] Speaker diarization (Deepgram Nova-3, 3 speakers tested successfully)
-- [x] Word-wrapping on display simulator
-- [x] Privacy-first architecture (ContactStore, SessionLabels, mode toggle)
-- [x] GDPR export/delete for voiceprints
-- [x] Debug panel (hidden by default, show with ?debug=true or localStorage)
-- [x] Settings: 13 languages, smart formatting, profanity filter
-- [x] Contacts mode as default
+### Caption UX engine (research-driven, for DHH readers)
+- [x] Stable rolling 3-line window; finalized words never reflow
+- [x] Flicker-free interim stabilization (only the live tail mutates)
+- [x] Phrase/word-boundary wrapping (never mid-word); pixel-aware in the renderer
+- [x] Turn-change markers + current-speaker emphasis (monochrome-safe)
+- [x] Interim text rendered distinct (dimmer) from finalized text
+- [x] BLE-safe display throttling (newest-wins, ~300ms) + partial updates
+- [x] Always-visible capture-state badge (anti silent-failure) + server error forwarding
 
-### Speaker Identification
-- [x] Real embedding provider — MFCC (512-pt FFT, 40 mel filters, 192-dim L2 embedding)
-- [x] Enrollment flow — "Add Contact" modal with 15s recording + countdown
-- [x] Server speaker matching pipeline — SpeakerMatcher wired, rate-limited, speaker_identified messages
-- [x] Per-speaker 30s audio ring buffer — retroactive enrollment via enroll_from_buffer
-- [x] "Save voice" button per speaker in session panel
-- [x] Ring buffer timestamp offset fix — Deepgram timestamps correctly aligned to ring
-- [x] ContactStore auto-syncs to server after enrollment (was the core recognition bug)
-- [x] Match threshold tuned to 0.65 for real-world MFCC audio
+### Speaker identification
+- [x] SpeakerIdentityResolver — online centroids + global 1:1 assignment +
+      hysteresis (fixes the lock-forever / index-flip / double-naming bugs)
+- [x] VAD strips silence before every embedding
+- [x] CMVN channel normalization in the MFCC provider (far-field robustness)
+- [x] Multi-sample enrollment averaging (ContactStore.addOrMerge)
+- [x] Enrollment quality gates (net-speech duration, SNR, silence ratio)
+- [x] Opt-in ONNX neural embedder (WeSpeaker ECAPA) with self-check + MFCC fallback
+- [x] Deepgram endpointing tuned to 300ms for stable diarization indices
 
-### UX
-- [x] Font size setting (small/medium/large) wired to display renderer
-- [x] Pause indicator on glasses display (⏸ overlay top-right)
-- [x] Client WebSocket auto-reconnect with exponential backoff (ReconnectScheduler)
-- [x] Deepgram error handling — user-friendly messages for quota/key expiry
-- [x] idMode persisted to localStorage + sent in config messages
-- [x] Session-only vs recognized badge in speakers panel
-- [x] Speakers panel auto-opens when first speakers detected
-- [x] Contacts panel open by default
-- [x] iPhone glasses mode cleanup — simulator hidden, Start/Pause hidden, hint hidden
-- [x] Import contacts from JSON (file picker with merge + feedback)
-
-### Settings & Types
-- [x] applyServerIdentification() on SessionLabels — bridges server match → display
-- [x] Production WS URL: wss://hostname/ws on HTTPS, ws://hostname:8080 on HTTP
-- [x] Deepgram endpointing tuned for fast conversation (150ms endpoint, 1000ms utterance_end)
-
-### Infrastructure
-- [x] GitHub Actions CI — lint + test on push/PR to main/dev
-- [x] VPS deployment plan written (DEPLOY_PLAN.md)
-- [x] 146 tests passing across 11 test files
+### Earlier foundation
+- [x] WebSocket proxy + Deepgram Nova-3 integration; browser fallback
+- [x] Privacy-first architecture (ContactStore, SessionLabels, mode toggle); GDPR export/delete
+- [x] Enrollment flow (mic + from-session-buffer); name-alert wake word (Porcupine)
+- [x] Settings (13 languages, smart formatting, profanity filter, font size)
+- [x] Auto-reconnect with backoff; user-friendly Deepgram error messages
+- [x] CI (typecheck + test) — fixed a pre-existing tsc failure on main
+- [x] 209 tests passing across 17 test files
