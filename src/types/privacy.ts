@@ -11,6 +11,11 @@ export interface SavedContact {
   sampleDurationMs: number;
   /** Optional auto-expiry in days (null = never) */
   expiryDays: number | null;
+  /**
+   * Number of enrollment samples averaged into this voiceprint. More samples
+   * (across sessions/conditions) sharpen the centroid and lower error.
+   */
+  sampleCount?: number;
 }
 
 /** Temporary session label (not persisted) */

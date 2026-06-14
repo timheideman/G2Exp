@@ -169,6 +169,37 @@ function aggregateMeanStd(
   return { mean, std };
 }
 
+/**
+ * Cepstral Mean-Variance Normalization (CMVN), applied per-utterance to the
+ * MFCC matrix in place. A linear channel (mic, room, distance) shows up as an
+ * additive offset in the cepstral domain — subtracting the per-coefficient
+ * mean removes it; dividing by the per-coefficient std equalizes scale. This is
+ * the single biggest lever for far-field / cross-device robustness, and it's
+ * essentially free. Done before delta computation so deltas see normalized MFCCs.
+ */
+function applyCMVN(matrix: Float64Array[]): void {
+  const T = matrix.length;
+  if (T < 2) return;
+  const dim = matrix[0].length;
+
+  const mean = new Float64Array(dim);
+  for (const row of matrix) for (let i = 0; i < dim; i++) mean[i] += row[i];
+  for (let i = 0; i < dim; i++) mean[i] /= T;
+
+  const std = new Float64Array(dim);
+  for (const row of matrix) {
+    for (let i = 0; i < dim; i++) {
+      const d = row[i] - mean[i];
+      std[i] += d * d;
+    }
+  }
+  for (let i = 0; i < dim; i++) std[i] = Math.sqrt(std[i] / T) || 1;
+
+  for (const row of matrix) {
+    for (let i = 0; i < dim; i++) row[i] = (row[i] - mean[i]) / std[i];
+  }
+}
+
 /** L2-normalize an array in-place (returns same array) */
 function l2Normalize(vec: Float64Array): Float64Array {
   let norm = 0;
@@ -278,6 +309,9 @@ export class RealEmbeddingProvider implements EmbeddingProvider {
 
       mfccMatrix[f] = mfccs;
     }
+
+    // ── 2b. CMVN — remove channel/mic offset (far-field robustness) ──
+    applyCMVN(mfccMatrix);
 
     // ── 3. Delta and delta-delta ───────────────────────────
     const deltaMatrix = computeDelta(mfccMatrix, DELTA_N);

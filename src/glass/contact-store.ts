@@ -46,11 +46,35 @@ export class ContactStore {
       lastMatchedAt: null,
       sampleDurationMs,
       expiryDays: expiryDays ?? null,
+      sampleCount: 1,
     };
     this.contacts.set(contact.id, contact);
     this.save();
     this.notify();
     return contact;
+  }
+
+  /**
+   * Enroll a sample, AVERAGING into an existing contact of the same name when
+   * one exists. Multi-sample centroids (across sessions/conditions) materially
+   * lower error — research shows 2-4× EER reduction vs a single sample. Each
+   * embedding is L2-normalized, combined as a running mean weighted by the
+   * existing sample count, then re-normalized.
+   */
+  addOrMerge(name: string, embedding: number[], sampleDurationMs: number): SavedContact {
+    const existing = this.findByName(name);
+    if (!existing) return this.add(name, embedding, sampleDurationMs);
+
+    const n = existing.sampleCount ?? 1;
+    const prev = l2normalize(existing.embedding);
+    const next = l2normalize(embedding);
+    const merged = prev.map((v, i) => (v * n + next[i]) / (n + 1));
+    existing.embedding = l2normalize(merged);
+    existing.sampleCount = n + 1;
+    existing.sampleDurationMs += sampleDurationMs;
+    this.save();
+    this.notify();
+    return existing;
   }
 
   /** Update a contact's name */
@@ -265,4 +289,13 @@ export class ContactStore {
       console.error('[ContactStore] Failed to save — localStorage full?');
     }
   }
+}
+
+/** L2-normalize a vector (returns a new array; safe on zero vectors). */
+function l2normalize(vec: number[]): number[] {
+  let norm = 0;
+  for (const v of vec) norm += v * v;
+  norm = Math.sqrt(norm);
+  if (norm < 1e-9) return vec.slice();
+  return vec.map((v) => v / norm);
 }

@@ -19,6 +19,9 @@
     "@picovoice/porcupine-web": "^4.0.0",
     "ws": "^8.18.0"
   },
+  "optionalDependencies": {
+    "onnxruntime-node": "^1.26.0"
+  },
   "devDependencies": {
     "@evenrealities/evenhub-cli": "latest",
     "@evenrealities/evenhub-simulator": "latest",

@@ -13,9 +13,12 @@ import 'dotenv/config';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import type { ListenLiveClient } from '@deepgram/sdk';
-import { RealEmbeddingProvider } from './real-embedding-provider';
 import { VoiceprintStore } from './voiceprint-store';
 import { SpeakerIdentityResolver } from './speaker-identity-resolver';
+import { detectVoiced } from './vad';
+import { assessEnrollmentQuality } from './enrollment-quality';
+import { createEmbeddingProvider } from './embedding-provider-factory';
+import type { EmbeddingProvider } from '../types/speaker';
 
 const PORT = parseInt(process.env.WS_PORT || '8080', 10);
 const DG_API_KEY = process.env.DEEPGRAM_API_KEY;
@@ -36,8 +39,13 @@ const deepgram = createClient(DG_API_KEY, {
   global: { url: deepgramUrl },
 });
 
-// ─── Shared embedding provider (singleton — mel filterbank cached) ──────────
-const embeddingProvider = new RealEmbeddingProvider();
+// ─── Shared embedding provider (singleton; selected at startup) ─────────────
+// Resolved asynchronously (ONNX backend self-checks at init). Until ready,
+// matching simply doesn't run — captions are unaffected.
+let embeddingProvider: EmbeddingProvider | null = null;
+createEmbeddingProvider()
+  .then((p) => { embeddingProvider = p; })
+  .catch((err) => { console.error('Failed to init embedding provider:', err); });
 
 // ─── Speaker matching constants ─────────────────────────────────────────────
 // Identity is resolved by the SpeakerIdentityResolver (online centroids +
@@ -223,6 +231,7 @@ wss.on('connection', (clientWs: WebSocket) => {
     durationMs: number,
   ): void {
     if (sessionVoiceprintStore.size === 0) return; // nothing to match against
+    if (!embeddingProvider) return; // provider still initializing
 
     const acc = getAccumulator(speakerIndex);
     acc.audioChunks.push(audio);
@@ -242,11 +251,18 @@ wss.on('connection', (clientWs: WebSocket) => {
     acc.audioChunks = [];
     acc.totalAudioMs = 0;
 
+    const provider = embeddingProvider;
     acc.embedding = (async () => {
       try {
-        const embedding = await embeddingProvider.extractEmbedding(fullAudio, 16000);
+        // Strip non-speech before embedding — silence is similar across all
+        // speakers and flattens the very differences we need.
+        const vad = detectVoiced(fullAudio);
+        const audioForEmbedding = vad.voicedMs >= 300 ? vad.voiced : fullAudio;
+        const weightSec = (vad.voicedMs > 0 ? vad.voicedMs : segMs) / 1000;
+
+        const embedding = await provider.extractEmbedding(audioForEmbedding, 16000);
         // Weight evidence by the voiced duration of the segment (seconds).
-        const view = resolver.observe(speakerIndex, embedding, segMs / 1000);
+        const view = resolver.observe(speakerIndex, embedding, weightSec);
         emitIdentityChanges(view);
       } catch (err) {
         console.error(`[SpeakerId] Error embedding speaker ${speakerIndex}:`, err);
@@ -603,9 +619,30 @@ wss.on('connection', (clientWs: WebSocket) => {
                 offset += chunk.length;
               }
 
-              const embedding = await embeddingProvider.extractEmbedding(fullAudio, 16000);
+              // Quality gate: reject too-short / too-noisy / mostly-silent
+              // enrollments so a bad sample can't poison the voiceprint.
+              const quality = assessEnrollmentQuality(fullAudio);
+              if (!quality.ok) {
+                console.log(`⚠️  Enrollment rejected for "${name}": ${quality.reason}`);
+                clientWs.send(JSON.stringify({
+                  type: 'enrollment_error',
+                  message: quality.reason,
+                }));
+                return;
+              }
 
-              console.log(`✅ Enrollment embedding ready for "${name}" (dim=${embedding.length})`);
+              if (!embeddingProvider) {
+                clientWs.send(JSON.stringify({
+                  type: 'enrollment_error',
+                  message: 'Voice engine still starting — try again in a moment.',
+                }));
+                return;
+              }
+
+              // Embed the voiced-only audio (silence stripped).
+              const embedding = await embeddingProvider.extractEmbedding(quality.voiced, 16000);
+
+              console.log(`✅ Enrollment embedding ready for "${name}" (dim=${embedding.length}, voiced=${(quality.voicedMs / 1000).toFixed(1)}s, snr=${quality.snrDb.toFixed(0)}dB)`);
 
               clientWs.send(JSON.stringify({
                 type: 'enrollment_result',
@@ -679,9 +716,34 @@ wss.on('connection', (clientWs: WebSocket) => {
 
           (async () => {
             try {
-              const embedding = await embeddingProvider.extractEmbedding(audio, 16000);
+              // The per-speaker ring already holds extracted word-range audio,
+              // so it's cleaner than a raw mic blob — apply a lenient gate
+              // (mainly a net-speech floor) before embedding.
+              const quality = assessEnrollmentQuality(audio, {
+                minVoicedMs: 4000,
+                minSnrDb: 8,
+                minVoicedRatio: 0.1,
+              });
+              if (!quality.ok) {
+                console.log(`⚠️  Buffer enrollment rejected for "${bufferName}": ${quality.reason}`);
+                clientWs.send(JSON.stringify({
+                  type: 'enrollment_error',
+                  message: quality.reason,
+                }));
+                return;
+              }
 
-              console.log(`✅ Buffer enrollment embedding ready for "${bufferName}" (dim=${embedding.length})`);
+              if (!embeddingProvider) {
+                clientWs.send(JSON.stringify({
+                  type: 'enrollment_error',
+                  message: 'Voice engine still starting — try again in a moment.',
+                }));
+                return;
+              }
+
+              const embedding = await embeddingProvider.extractEmbedding(quality.voiced, 16000);
+
+              console.log(`✅ Buffer enrollment embedding ready for "${bufferName}" (dim=${embedding.length}, voiced=${(quality.voicedMs / 1000).toFixed(1)}s)`);
 
               clientWs.send(JSON.stringify({
                 type: 'enrollment_result',

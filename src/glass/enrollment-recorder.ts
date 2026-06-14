@@ -178,8 +178,10 @@ export class EnrollmentRecorder {
           return true;
         }
 
-        // Save to ContactStore (voiceprint stays on device)
-        const contact = this.contactStore.add(name, embedding, durationMs);
+        // Save to ContactStore (voiceprint stays on device). addOrMerge
+        // averages into an existing same-name contact, so re-enrolling the
+        // same person strengthens their voiceprint instead of duplicating it.
+        const contact = this.contactStore.addOrMerge(name, embedding, durationMs);
 
         this._resolvePending({ success: true, contact, durationMs });
         return true;

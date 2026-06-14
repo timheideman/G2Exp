@@ -84,6 +84,51 @@ describe('ContactStore', () => {
     });
   });
 
+  describe('addOrMerge (multi-sample enrollment)', () => {
+    it('creates a new contact when the name is new', () => {
+      const c = store.addOrMerge('Sarah', makeEmbedding(1), 10000);
+      expect(store.size).toBe(1);
+      expect(c.sampleCount).toBe(1);
+    });
+
+    it('averages a second sample into an existing same-name contact', () => {
+      store.addOrMerge('Sarah', makeEmbedding(1), 10000);
+      const merged = store.addOrMerge('Sarah', makeEmbedding(2), 8000);
+      // Still one contact, now with 2 samples and accumulated duration.
+      expect(store.size).toBe(1);
+      expect(merged.sampleCount).toBe(2);
+      expect(merged.sampleDurationMs).toBe(18000);
+    });
+
+    it('keeps the merged embedding L2-normalized', () => {
+      store.addOrMerge('Sarah', makeEmbedding(1), 10000);
+      const merged = store.addOrMerge('Sarah', makeEmbedding(2), 10000);
+      const norm = Math.sqrt(merged.embedding.reduce((s, v) => s + v * v, 0));
+      expect(norm).toBeCloseTo(1, 5);
+    });
+
+    it('merged embedding lies between the two input directions', () => {
+      const e1 = makeEmbedding(1);
+      const e2 = makeEmbedding(3);
+      store.addOrMerge('Sarah', e1, 10000);
+      const merged = store.addOrMerge('Sarah', e2, 10000).embedding;
+      const cos = (a: number[], b: number[]) => {
+        let d = 0, na = 0, nb = 0;
+        for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+        return d / (Math.sqrt(na) * Math.sqrt(nb));
+      };
+      // The centroid should be similar to both originals.
+      expect(cos(merged, e1)).toBeGreaterThan(0.4);
+      expect(cos(merged, e2)).toBeGreaterThan(0.4);
+    });
+
+    it('different names stay separate', () => {
+      store.addOrMerge('Sarah', makeEmbedding(1), 10000);
+      store.addOrMerge('Marco', makeEmbedding(2), 10000);
+      expect(store.size).toBe(2);
+    });
+  });
+
   describe('persistence', () => {
     it('persists contacts to localStorage', () => {
       store.add('Sarah', makeEmbedding(1), 15000);

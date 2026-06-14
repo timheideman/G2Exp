@@ -3,3 +3,7 @@ dist/
 *.ehpk
 .env
 .DS_Store
+
+# Neural speaker-embedding models (downloaded on the server, not committed)
+models/
+*.onnx
