@@ -161,7 +161,12 @@ function extractTimeRange(
 
 // ─── WebSocket Server ────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ port: PORT });
+// Bind all interfaces explicitly so the glasses app (loaded on the phone over
+// LAN via QR sideload) can reach this server at the laptop's LAN IP, not just
+// localhost. ws@8 defaults to all-interfaces, but being explicit removes any
+// ambiguity — this is the difference between "captions connect" and a silent
+// ECONNREFUSED you'd waste device time chasing.
+const wss = new WebSocketServer({ host: '0.0.0.0', port: PORT });
 console.log(`🎙️  LiveCaption server listening on ws://0.0.0.0:${PORT}`);
 
 wss.on('connection', (clientWs: WebSocket) => {

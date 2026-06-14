@@ -76,7 +76,14 @@ export class LiveCaptionApp {
     console.log(`[LiveCaption] Mode: ${this.mode}`);
 
     if (this.mode === 'glasses') {
-      await this.initGlasses();
+      // Don't let a glasses-init failure prevent the WS from connecting — we
+      // still want the server connected (and the error already surfaced via
+      // setStatus) so the session is diagnosable rather than dead-silent.
+      try {
+        await this.initGlasses();
+      } catch (err) {
+        console.error('[LiveCaption] Glasses init failed — continuing to connect:', err);
+      }
     } else {
       this.initBrowser();
     }
@@ -142,30 +149,52 @@ export class LiveCaptionApp {
 
     const { TextContainerProperty, CreateStartUpPageContainer, OsEventTypeList } = this.sdk;
 
-    const container = new TextContainerProperty({
-      xPosition: 0,
-      yPosition: 0,
-      width: 576,
-      height: 288,
-      borderWidth: 0,
-      borderColor: 0,
-      paddingLength: 6,
-      containerID: this.containerId,
-      containerName: this.containerName,
-      content: '  LiveCaption\n\n  Connecting...',
-      isEventCapture: 1,
-    });
+    // Wrap the initial container creation: if it throws on the real device, we
+    // surface the error on-screen instead of silently wedging on "Connecting…"
+    // (a permanent "Connecting…" with no error is otherwise impossible to debug).
+    try {
+      const container = new TextContainerProperty({
+        xPosition: 0,
+        yPosition: 0,
+        width: 576,
+        height: 288,
+        borderWidth: 0,
+        borderColor: 0,
+        paddingLength: 6,
+        containerID: this.containerId,
+        containerName: this.containerName,
+        content: '  LiveCaption\n\n  Connecting...',
+        isEventCapture: 1,
+      });
 
-    const startup = new CreateStartUpPageContainer({
-      containerTotalNum: 1,
-      textObject: [container],
-    });
-    await this.bridge.createStartUpPageContainer(startup);
+      const startup = new CreateStartUpPageContainer({
+        containerTotalNum: 1,
+        textObject: [container],
+      });
+      await this.bridge.createStartUpPageContainer(startup);
+    } catch (err: any) {
+      console.error('[LiveCaption] createStartUpPageContainer failed:', err);
+      this.setStatus(`Display init failed: ${err?.message || err}`, false);
+      throw err;
+    }
 
+    let audioChunkLogged = false;
     this.bridge.onEvenHubEvent((event: any) => {
-      if (event.audioEvent?.audioPcm && this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(event.audioEvent.audioPcm);
-        this.nameAlert.process(event.audioEvent.audioPcm);
+      const rawPcm = event.audioEvent?.audioPcm;
+      if (rawPcm) {
+        // Normalize to Uint8Array — most SDK builds deliver one, but after JSON
+        // transit it can surface as number[]/ArrayBuffer; downstream code
+        // (ws.send, NameAlertDetector.process) needs a real typed array.
+        const pcm = rawPcm instanceof Uint8Array ? rawPcm : new Uint8Array(rawPcm);
+        if (!audioChunkLogged) {
+          audioChunkLogged = true;
+          console.log(`[LiveCaption] First glasses audio chunk: ${pcm.byteLength} bytes`);
+        }
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(pcm);
+        }
+        // Feed the wake-word detector regardless of WS state (it's on-device).
+        this.nameAlert.process(pcm);
       }
       const eventType = event.textEvent?.eventType ?? event.sysEvent?.eventType;
       if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
