@@ -16,9 +16,13 @@ import type { ListenLiveClient } from '@deepgram/sdk';
 import { VoiceprintStore } from './voiceprint-store';
 import { SpeakerIdentityResolver } from './speaker-identity-resolver';
 import { detectVoiced } from './vad';
+import { assessSegmentHomogeneity, DEFAULT_HOMOGENEITY } from './segment-homogeneity';
 import { assessEnrollmentQuality } from './enrollment-quality';
 import { createEmbeddingProvider } from './embedding-provider-factory';
 import type { EmbeddingProvider } from '../types/speaker';
+// Pure DSP (no DOM) — AGC runs HERE, on the Deepgram branch only, so the voice-
+// embedding pipeline below keeps seeing the RAW mic audio (see sendAudio).
+import { MicAgc } from '../glass/mic-agc';
 
 const PORT = parseInt(process.env.WS_PORT || '8080', 10);
 const DG_API_KEY = process.env.DEEPGRAM_API_KEY;
@@ -53,6 +57,15 @@ createEmbeddingProvider()
 // We embed a per-index segment once it has accumulated this much speech.
 const SEGMENT_MIN_MS = 1500;    // embed a segment after ~1.5s of that speaker's speech
 
+// Mixed-segment rejection threshold (cosine between a segment's two halves,
+// below which we treat it as two voices and drop it). Embedder-dependent —
+// override without a redeploy via SEGMENT_MIN_HALF_SIM while calibrating against
+// the ?diag half-similarity logs. Falls back to the module default.
+const SEGMENT_MIN_HALF_SIM = process.env.SEGMENT_MIN_HALF_SIM
+  ? parseFloat(process.env.SEGMENT_MIN_HALF_SIM)
+  : DEFAULT_HOMOGENEITY.minHalfSimilarity;
+const homogeneityOpts = { minHalfSimilarity: SEGMENT_MIN_HALF_SIM };
+
 // Coalesce mic frames to ~50ms before forwarding to Deepgram (16kHz·16-bit·mono
 // → 1600 bytes/50ms). Stays in DG's recommended 20–100ms buffer band.
 const DG_SEND_BATCH_BYTES = 1600;
@@ -75,6 +88,14 @@ interface SessionConfig {
   language: string;
   smartFormat: boolean;
   profanityFilter: boolean;
+  /**
+   * Apply server-side AGC to the Deepgram branch. The glasses client sends raw
+   * PCM and sets this true (lift distant speech for transcription); the browser
+   * client leaves it false because getUserMedia's autoGainControl already does
+   * it (so we don't gain-stack). The voice-embedding pipeline is unaffected
+   * either way — it always reads the raw ring buffer.
+   */
+  micAgc: boolean;
 }
 
 interface LoadedVoiceprint {
@@ -197,6 +218,12 @@ wss.on('connection', (clientWs: WebSocket) => {
   let dgSendTimer: ReturnType<typeof setTimeout> | null = null;
   let closing = false;
 
+  // AGC for the DEEPGRAM branch only. Stateful (envelope + gain ramp persist
+  // across chunks), so it's per-connection and processes each client chunk in
+  // arrival order — exactly as the old client-side AGC did. The ring buffer
+  // (and thus every voice embedding) is written from the RAW chunk, never this.
+  const dgAgc = new MicAgc();
+
   // ── Enrollment state ────────────────────────────────────────
   let enrollmentMode = false;
   let enrollmentChunks: Buffer[] = [];
@@ -282,7 +309,25 @@ wss.on('connection', (clientWs: WebSocket) => {
         const audioForEmbedding = vad.voicedMs >= 300 ? vad.voiced : fullAudio;
         const weightSec = (vad.voicedMs > 0 ? vad.voicedMs : segMs) / 1000;
 
-        const embedding = await provider.extractEmbedding(audioForEmbedding, 16000);
+        // GUARD: Deepgram's streaming diarizer can lump two voices under one
+        // index, making this segment a BLEND. Embedding a blend pollutes the
+        // voiceprint and is the root of "speaker B is two people → matched to
+        // me". Split the voiced audio, embed each half, and compare: a true
+        // single speaker's halves agree; a segment straddling a speaker change
+        // does not. If mixed, drop it (no evidence) rather than mismatch.
+        const hom = await assessSegmentHomogeneity(
+          audioForEmbedding,
+          (pcm, sr) => provider.extractEmbedding(pcm, sr),
+          homogeneityOpts,
+        );
+        if (!hom.homogeneous) {
+          console.log(`🚫 [SpeakerId] Dropped MIXED segment for index ${speakerIndex} (half-sim=${hom.halfSimilarity?.toFixed(2)}) — not matching, likely 2 voices on one Deepgram index`);
+          return;
+        }
+
+        // Reuse the mean-of-halves embedding when we split-tested; otherwise the
+        // segment was too short to split — embed it whole as before.
+        const embedding = hom.embedding ?? await provider.extractEmbedding(audioForEmbedding, 16000);
         // Weight evidence by the voiced duration of the segment (seconds).
         const view = resolver.observe(speakerIndex, embedding, weightSec);
         emitIdentityChanges(view);
@@ -370,6 +415,9 @@ wss.on('connection', (clientWs: WebSocket) => {
       console.log(`✅ Deepgram ready (lang=${cfg.language})`);
       isDeepgramOpen = true;
       ringBytesAtDgOpen = globalRing.totalBytesWritten;
+      // Fresh stream → re-ramp AGC gain from unity rather than a stale envelope
+      // carried over from a previous (reconnected) Deepgram session.
+      dgAgc.reset();
       console.log(`📍 Ring offset at Deepgram open: ${ringBytesAtDgOpen} bytes (${(ringBytesAtDgOpen / BYTES_PER_SEC).toFixed(2)}s)`);
       startKeepalive();
 
@@ -396,7 +444,12 @@ wss.on('connection', (clientWs: WebSocket) => {
       const speakerValues = words.map((w: any) => w.speaker);
       const uniqueSpeakers = [...new Set(speakerValues.filter((s: any) => s !== undefined))];
       if (isFinal) {
-        console.log(`📝 [${isFinal ? 'FINAL' : 'interim'}] speakers=${JSON.stringify(uniqueSpeakers)} text="${alt.transcript.substring(0, 60)}"`);
+        // ?diag: when a single final carries MORE than one speaker index, the
+        // diarizer changed speakers mid-utterance — useful to see how often that
+        // happens vs. the opposite failure (two people stuck on one index, which
+        // shows as a single index here but is caught acoustically downstream).
+        const multi = uniqueSpeakers.length > 1 ? ` ⚠️MULTI(${uniqueSpeakers.length})` : '';
+        console.log(`📝 [FINAL] speakers=${JSON.stringify(uniqueSpeakers)}${multi} text="${alt.transcript.substring(0, 60)}"`);
       }
 
       // Determine primary speaker
@@ -525,8 +578,12 @@ wss.on('connection', (clientWs: WebSocket) => {
   }
 
   function sendAudio(data: Buffer): void {
-    // Write to global ring buffer immediately — speaker-matching timing depends
-    // on every chunk being recorded as it arrives, independent of DG batching.
+    // Write the RAW chunk to the global ring immediately. The ring is the source
+    // for per-speaker voice embeddings, which MUST see unmodified audio: AGC
+    // normalizes every voice toward one loudness and injects a varying gain
+    // envelope, collapsing the very inter-speaker differences the embedder keys
+    // on (the cause of the "can't tell voices apart" regression). Speaker-match
+    // timing also depends on every chunk being recorded as it arrives.
     writeRingBuffer(globalRing, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
 
     audioChunkCount++;
@@ -543,12 +600,22 @@ wss.on('connection', (clientWs: WebSocket) => {
       openDeepgram(config);
     }
 
+    // AGC the audio bound for DEEPGRAM ONLY (lift quiet/distant speech toward
+    // its VAD floor). Applied here, after the raw ring write above, so it never
+    // reaches the embedding pipeline. process() returns a fresh buffer (it never
+    // mutates its input — the ring's raw copy is safe). Skipped when the client
+    // already gain-controls its mic (browser autoGainControl) to avoid stacking;
+    // there we copy `data` since the caller may reuse its backing buffer.
+    const forDg: Buffer = config?.micAgc
+      ? Buffer.from(dgAgc.process(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)))
+      : Buffer.from(data);
+
     // Coalesce the glasses' tiny ~10ms frames into ~50ms packets before
     // forwarding to Deepgram. Sending 100 messages/sec adds WS overhead/jitter
     // without making interims faster (Deepgram buffers internally anyway); its
     // recommended buffer band is 20–100ms.
-    dgSendBuffer.push(Buffer.from(data));
-    dgSendBufferBytes += data.byteLength;
+    dgSendBuffer.push(forDg);
+    dgSendBufferBytes += forDg.byteLength;
     if (dgSendBufferBytes >= DG_SEND_BATCH_BYTES) {
       flushDgSendBuffer();
     } else if (dgSendTimer === null) {
@@ -601,15 +668,21 @@ wss.on('connection', (clientWs: WebSocket) => {
             language: msg.language || 'nl',
             smartFormat: msg.smartFormat ?? true,
             profanityFilter: msg.profanityFilter ?? false,
+            // Default ON when unspecified: an older glasses client (the device
+            // that needs the distant-speech lift) won't send the flag. Only the
+            // browser, which already auto-gains, explicitly turns it off.
+            micAgc: msg.micAgc ?? true,
           };
 
+          // micAgc only changes the Deepgram send-branch transform — no Deepgram
+          // reopen needed — so it's intentionally not part of configChanged.
           const configChanged = !config
             || newConfig.language !== config.language
             || newConfig.smartFormat !== config.smartFormat
             || newConfig.profanityFilter !== config.profanityFilter;
 
           config = newConfig;
-          console.log(`⚙️  Config: lang=${config.language}, smart=${config.smartFormat}, profanity=${config.profanityFilter}`);
+          console.log(`⚙️  Config: lang=${config.language}, smart=${config.smartFormat}, profanity=${config.profanityFilter}, micAgc=${config.micAgc}`);
 
           if (configChanged && dgConnection) {
             openDeepgram(config);

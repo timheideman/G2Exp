@@ -870,13 +870,14 @@ initNameAlertSettings();
   console.log(`[cadence] sim ${on ? 'stepped to real ~3fps glasses cadence' : 'silky (immediate)'}`);
 };
 // Mic sensitivity (AGC) A/B helper:
-//   __agc()        → print live gain/level for the last audio buffer
-//   __agc(false)   → disable AGC (send raw mic) to compare distant-speech pickup
-//   __agc(true)    → re-enable. Default is ON. Affects the mic→Deepgram branch
-// only; the wake-word detector always sees raw PCM regardless.
+//   __agc(false)  → disable AGC (Deepgram gets raw mic) to compare distant pickup
+//   __agc(true)   → re-enable (default ON). Re-sends config so it applies live.
+// AGC runs SERVER-SIDE on the mic→Deepgram branch only; the server's voice-
+// embedding (diarization) pipeline and the on-device wake-word detector both
+// always see raw audio, so this never affects speaker separation.
 (window as any).__agc = (enable?: boolean) => {
   const s = app.agc(enable);
-  console.log(`[agc] ${s.enabled ? 'ON' : 'OFF'} gain=${s.gain.toFixed(2)}× level=${s.level.toFixed(4)}${s.gated ? ' (gated: silence)' : ''}`);
+  console.log(`[agc] ${s.enabled ? 'ON (server lifts Deepgram branch)' : 'OFF (raw mic to Deepgram)'}`);
   return s;
 };
 

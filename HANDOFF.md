@@ -101,8 +101,29 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
   Together these fix the "new line broke my sentence the instant my name was
   assigned" bug: an index flip / rename no longer starts a new line. A genuinely
   different speaker (different resolved tag) still breaks to a new line.
-- **Bitmaps exist but are useless for live captions** — capped at 288×144, no
-  partial update, ~1.6–3s to transfer. Text container is the only path.
+- **No smooth motion / pixel animation exists — verified against the full SDK
+  type defs + official docs (Jun 2026).** The bridge has exactly 5 display calls:
+  `createStartUpPageContainer`, `rebuildPageContainer`, `updateImageRawData`,
+  `textContainerUpgrade`, `shutDownPageContainer`. Docs state plainly: *"no
+  programmatic scroll position, no animations… no arbitrary pixel drawing."* So
+  the smooth right-to-left "Japanese-TV ticker" slide is NOT reproducible via the
+  text system — all text motion is discrete whole-line steps on string updates,
+  capped at the ~3/sec BLE rate. Two levers we are NOT yet using, if scroll
+  jolt becomes a real fatigue problem (parked as polish — Tim's call):
+  - **`textContainerUpgrade` tail-splice:** `contentOffset`/`contentLength` send
+    only the changed tail instead of the whole string. Docs: *"faster than a full
+    rebuild and flicker-free on hardware."* Our HANDOFF previously called this
+    "unverified" — the official docs now confirm it. Lowest-risk way to soften
+    the re-wrap jolt; still discrete, no pixel glide.
+  - **Bitmap re-blit (high risk, unverified speed):** `ImageRawDataUpdate` /
+    `ImageRawDataUpdateFields` is actually a FRAGMENTED + COMPRESSED transfer
+    (`mapSessionId`, `mapTotalSize`, `mapFragmentIndex`, `mapFragmentPacketSize`,
+    `compressMode`) — NOT the "one slow 1.6–3s full blit" the old note claimed.
+    But: image width caps at 288 (HALF the 576 panel → a full-width ticker needs
+    two side-by-side image containers), `updateImageRawData` forbids concurrent
+    sends, and NO frame-rate figure is documented. Whether it can re-blit fast
+    enough to animate is unknown and would need an on-device FPS probe before any
+    bet. Pursuing it = rebuilding the caption renderer in pixels.
 - **BLE display update ceiling ~3/sec.** `app.ts` throttles to 300ms
   (`GLASSES_UPDATE_INTERVAL_MS`) with newest-wins coalescing. Updating faster is
   dropped/coalesced by the firmware anyway.
@@ -112,6 +133,28 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
 - **Deepgram streaming diarization indices are unstable** (a speaker can flip
   index). That's why the resolver re-derives names every segment instead of
   matching once. `endpointing` gates *finals* only, not interim text.
+- **Streaming diarization is the WEAK, unimproved model.** Deepgram's next-gen
+  diarizer (≈53% better) is **batch/pre-recorded only** — `diarize_model` does
+  not exist on streaming; streaming has just `diarize` (on/off) + `diarize_version`.
+  Two failure modes: (a) a speaker flips index — handled in the caption engine by
+  relabel-in-place; (b) **two similar voices in one room collapse onto ONE index**
+  — Deepgram's word labels can't separate them, so the per-index audio is a blend.
+- **Mixed-segment guard** (`src/server/segment-homogeneity.ts`): before embedding
+  an index's accumulated audio, we split it, embed each half, and compare. If the
+  halves disagree (cosine < threshold) the segment spans two voices → we DROP it
+  rather than poison the voiceprint (the "speaker B is two people, then matched to
+  me" bug). The threshold is **embedder-dependent and needs on-device calibration**:
+  watch the `🚫 Dropped MIXED` / `📝 [FINAL] … ⚠️MULTI` server logs, read the
+  half-similarity values for real same-speaker vs. two-speaker segments, and set
+  `SEGMENT_MIN_HALF_SIM` (env) between those distributions. Default 0.5 is a guess.
+  This stops the *wrong name*; it does NOT make Deepgram separate the voices — that
+  needs a real diarizer (pyannote) or our own voiceprint-clustering diarizer.
+- **Mic-AGC runs SERVER-SIDE, on the Deepgram branch only** (`index.ts` `sendAudio`
+  + `MicAgc`). The ring buffer that feeds voice embeddings stays RAW — AGC
+  normalizes loudness and would collapse the inter-speaker differences the
+  embedder needs (it broke diarization when it briefly ran client-side on the WS
+  copy). Gated by the `micAgc` config flag (glasses on, browser off — browser
+  already auto-gains). `?agc=off` / `__agc(false)` disables for an A/B.
 - **Mic delivers ~10ms / ~640B PCM frames**; the server coalesces to ~50ms
   before sending to Deepgram (sending 100 msgs/sec added overhead, not speed).
 - **Audio path:** `event.audioEvent.audioPcm` (normalized to Uint8Array) from

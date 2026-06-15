@@ -48,4 +48,10 @@ export interface ConfigMessage {
   profanityFilter: boolean;
   /** Speaker identification mode — optional for backwards compatibility */
   idMode?: IdentificationMode;
+  /**
+   * Apply server-side AGC to the Deepgram branch (lift quiet/distant speech).
+   * Glasses set this true (raw mic); browser leaves it false/undefined because
+   * getUserMedia already auto-gains. Server defaults to true when absent.
+   */
+  micAgc?: boolean;
 }

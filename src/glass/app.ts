@@ -19,7 +19,6 @@ import { SettingsManager } from './settings-manager';
 import { ReconnectScheduler } from './settings-manager';
 import { NameAlertDetector } from './name-alert-detector';
 import { DisplayThrottle } from './display-throttle';
-import { MicAgc } from './mic-agc';
 import type { LiveCaptionSettings, ConfigMessage } from '../types/settings';
 import type { CaptureState } from './caption-engine';
 
@@ -98,16 +97,13 @@ export class LiveCaptionApp {
   private nameAlert = new NameAlertDetector();
 
   /**
-   * Automatic gain control for the mic→Deepgram audio branch ONLY. The G2 hands
-   * us raw PCM with no gain control (audioControl is on/off), so a faint/distant
-   * talker arrives below Deepgram's VAD floor and never gets captioned — the
-   * "I can only talk to people right in front of me" symptom. AGC lifts quiet
-   * speech toward a target loudness (lift-only, soft-limited). On the laptop the
-   * browser's autoGainControl already does this, which is why it only bit on the
-   * glasses. The wake-word detector is deliberately fed the RAW PCM, not this.
-   * Disable for an on-device A/B with ?agc=off (defaults ON — it's the fix).
+   * Whether to ask the SERVER to gain-control the mic→Deepgram branch. The G2
+   * hands us raw PCM with no gain control, so a faint/distant talker arrives
+   * below Deepgram's VAD floor and never gets captioned — the "I can only talk
+   * to people right in front of me" symptom. The lift runs server-side (on the
+   * Deepgram branch ONLY, so voice embeddings still see raw audio); we just send
+   * the preference in our config. Disable for an on-device A/B with ?agc=off.
    */
-  private micAgc = new MicAgc();
   private agcEnabled = isAgcEnabled();
 
   // Callbacks for UI integration
@@ -180,9 +176,14 @@ export class LiveCaptionApp {
       language: settings.language.code,
       smartFormat: settings.smartFormat,
       profanityFilter: settings.profanityFilter,
+      // Ask the server to AGC the Deepgram branch only on glasses (raw mic, no
+      // gain control) and only when not disabled via ?agc=off. The browser path
+      // leaves it off — getUserMedia's autoGainControl already lifts the input,
+      // so server AGC on top would gain-stack.
+      micAgc: this.mode === 'glasses' && this.agcEnabled,
     };
     this.ws.send(JSON.stringify(msg));
-    console.log(`[LiveCaption] Config sent: lang=${msg.language}`);
+    console.log(`[LiveCaption] Config sent: lang=${msg.language}, micAgc=${msg.micAgc}`);
   }
 
   // ─── Glasses Mode ───────────────────────────────────────────
@@ -248,10 +249,12 @@ export class LiveCaptionApp {
           console.log(`[LiveCaption] First glasses audio chunk: ${pcm.byteLength} bytes`);
         }
         if (this.ws?.readyState === WebSocket.OPEN) {
-          // Lift quiet/distant speech toward Deepgram's floor before sending.
-          // AGC is applied to the WS copy ONLY — the wake-word detector below
-          // gets the raw PCM so its sensitivity tuning is untouched.
-          this.ws.send(this.agcEnabled ? this.micAgc.process(pcm) : pcm);
+          // Send RAW PCM. AGC now runs SERVER-SIDE on the Deepgram branch only,
+          // so the server's voice-embedding pipeline keeps seeing unmodified
+          // audio — gain-normalizing it here collapsed the inter-speaker
+          // differences and broke diarization. Whether the server lifts the
+          // Deepgram branch is driven by the `micAgc` flag in our config message.
+          this.ws.send(pcm);
         }
         // Feed the wake-word detector regardless of WS state (it's on-device).
         // RAW pcm by design — never the gain-adjusted buffer.
@@ -516,15 +519,17 @@ export class LiveCaptionApp {
   }
 
   /**
-   * Mic-AGC dev control (on-device A/B for the sensitivity fix). With no arg,
-   * just reports the live gain/level/gated readout for the last audio buffer;
-   * pass true/false to toggle AGC at runtime so you can hear/see the difference
-   * between "raw" and "lifted" without a reload. Returns the current state.
+   * Mic-AGC dev control (on-device A/B for the distant-speech fix). AGC now runs
+   * server-side on the Deepgram branch; this toggles the preference and re-sends
+   * config so the change takes effect live (no reload), letting you compare
+   * "raw" vs "lifted" transcription. Returns the requested state.
    */
-  agc(enable?: boolean): { enabled: boolean; gain: number; level: number; gated: boolean } {
-    if (typeof enable === 'boolean') this.agcEnabled = enable;
-    const s = this.micAgc.stats();
-    return { enabled: this.agcEnabled, gain: s.appliedGain, level: s.level, gated: s.gated };
+  agc(enable?: boolean): { enabled: boolean } {
+    if (typeof enable === 'boolean') {
+      this.agcEnabled = enable;
+      this.sendConfig(this.settings.current);
+    }
+    return { enabled: this.agcEnabled };
   }
 
   private updateDisplay(): void {
@@ -583,9 +588,8 @@ export class LiveCaptionApp {
       if (this.isListening) {
         await this.bridge!.audioControl(false);
         this.isListening = false;
-        // Drop the AGC envelope/gain so resume re-ramps from unity rather than
-        // a stale frozen gain captured at the moment we paused.
-        this.micAgc.reset();
+        // (AGC now lives server-side; it re-ramps from unity on each Deepgram
+        // (re)open, so there's no client envelope to reset on pause.)
         this.display.setPaused(true);
         this.setStatus('Paused', false);
         this.setCaptureState('paused');
