@@ -40,6 +40,14 @@ export type CaptionTokenState = 'final' | 'interim';
 export interface CaptionToken {
   text: string;
   state: CaptionTokenState;
+  /**
+   * Stable identity for this token across frames, so a renderer can tell a
+   * newly-arrived word from one that was already on screen (and animate only
+   * the former). Derived from (turn, word-position, text): a word keeps the
+   * same key when its interim is re-sliced or promoted to final, so settled
+   * text never re-animates. Optional — only `buildFrame` populates it.
+   */
+  key?: string;
 }
 
 /** A single visual line in the caption viewport. */
@@ -112,6 +120,12 @@ export const DEFAULT_CAPTION_CONFIG: CaptionEngineConfig = {
 
 /** Internal: a committed segment of speech from one speaker. */
 interface Segment {
+  /**
+   * Monotonic id assigned at creation, stable across trims. Used to mint stable
+   * per-token keys so a renderer doesn't re-animate settled text when the
+   * segment array is sliced.
+   */
+  seq: number;
   speaker: number;
   /** Words that are finalized and locked — never rewritten. */
   finalWords: string[];
@@ -131,9 +145,19 @@ export class CaptionEngine {
   /** The speaker whose turn is "current" (last to produce final/interim). */
   private currentSpeaker = -1;
   private tagResolver: TagResolver | null = null;
+  /** Monotonic segment id source (for stable per-token keys across trims). */
+  private nextSeq = 0;
 
   // Cap how much history we retain internally (the viewport shows far less).
   private static readonly MAX_SEGMENTS = 40;
+
+  // Trim hysteresis for the glasses turn window: we only START dropping the
+  // oldest turn once the estimated line count exceeds the budget by this much,
+  // then drop back to the budget. Without it, a turn whose interim grows by one
+  // word can repeatedly cross the threshold and evict/restore a turn every few
+  // hundred ms — the "lines suddenly jump up" thrash. The gap means the window
+  // holds steady through normal growth and only rolls at a real overflow.
+  private static readonly TRIM_HYSTERESIS_LINES = 2;
 
   constructor(config: Partial<CaptionEngineConfig> = {}) {
     this.config = { ...DEFAULT_CAPTION_CONFIG, ...config };
@@ -151,6 +175,9 @@ export class CaptionEngine {
   clear(): void {
     this.segments = [];
     this.currentSpeaker = -1;
+    // nextSeq is intentionally NOT reset — keeping it monotonic across a clear
+    // guarantees post-clear segments can't collide token keys with a stale
+    // pre-clear frame still being animated by the renderer.
   }
 
   // ─── Ingest ────────────────────────────────────────────────────
@@ -163,12 +190,22 @@ export class CaptionEngine {
     const words = tokenize(text);
     if (words.length === 0) return;
 
-    this.currentSpeaker = speaker;
-    const seg = this.activeSegmentFor(speaker);
+    const { seg, isRelabel } = this.segmentFor(speaker, words);
+    this.currentSpeaker = seg.speaker;
 
     // The arriving final supersedes any interim tail for this speaker.
     seg.interimWords = [];
-    seg.finalWords.push(...words);
+    if (isRelabel) {
+      // Re-diarization of the active turn: the diarizer moved these same words
+      // to `speaker`. The segment ALREADY holds this utterance (under the old
+      // index) — we relabelled it in place rather than opening a duplicate line.
+      // Append only the genuinely-new tail this final adds beyond what's locked,
+      // so we neither drop words nor print them twice.
+      const have = seg.finalWords.length;
+      if (words.length > have) seg.finalWords.push(...words.slice(have));
+    } else {
+      seg.finalWords.push(...words);
+    }
 
     this.trim();
   }
@@ -182,12 +219,28 @@ export class CaptionEngine {
    */
   updateInterim(speaker: number, text: string): void {
     const words = tokenize(text);
-    this.currentSpeaker = speaker;
-    const seg = this.activeSegmentFor(speaker);
+    let { seg } = this.segmentFor(speaker, words);
 
-    // Stabilize against what's already committed (final) for this segment:
-    // a streaming ASR interim repeats the whole utterance from its start, so
-    // drop the leading words that the finals have already locked.
+    // A streaming ASR interim repeats its OWN utterance from the start, so when
+    // the active turn already has locked finals we normally drop the leading
+    // words those finals cover and keep only the growing tail. But that holds
+    // ONLY while the interim is still the SAME utterance — i.e. it still replays
+    // the locked words. After an utterance finalizes and the same speaker starts
+    // a NEW sentence, Deepgram's fresh interim does NOT replay the old finalized
+    // words; blindly slicing it at finalWords.length would swallow its first
+    // words. We detect a new utterance by its interim no longer sharing even the
+    // first locked word, and start a fresh turn for the speaker instead. (A mere
+    // tail revision within the same utterance still shares the leading word, so
+    // this never fires spuriously on normal continuation.)
+    if (seg.finalWords.length > 0 && words.length > 0 && words[0] !== seg.finalWords[0]) {
+      seg = { seq: this.nextSeq++, speaker, finalWords: [], interimWords: [] };
+      this.segments.push(seg);
+      this.trim();
+    }
+    this.currentSpeaker = seg.speaker;
+
+    // Stabilize against what's already committed (final) for this segment: drop
+    // the leading words the finals have already locked, keep the changed tail.
     const lockedCount = seg.finalWords.length;
     const tail = words.slice(lockedCount);
 
@@ -213,7 +266,7 @@ export class CaptionEngine {
 
   /** Append a system notice line (e.g. "Paused"), speaker -1. */
   addNotice(text: string): void {
-    this.segments.push({ speaker: -1, finalWords: tokenize(text), interimWords: [] });
+    this.segments.push({ seq: this.nextSeq++, speaker: -1, finalWords: tokenize(text), interimWords: [] });
     this.currentSpeaker = -1;
     this.trim();
   }
@@ -243,9 +296,14 @@ export class CaptionEngine {
 
     for (let i = 0; i < this.segments.length; i++) {
       const seg = this.segments[i];
+      // Key each word by (segment-seq, absolute word position): a word keeps its
+      // key when its interim is re-sliced or promoted to final, so the renderer
+      // can animate only genuinely-new words and never re-fade settled text.
       const tokens: CaptionToken[] = [
-        ...seg.finalWords.map((w) => ({ text: w, state: 'final' as const })),
-        ...seg.interimWords.map((w) => ({ text: w, state: 'interim' as const })),
+        ...seg.finalWords.map((w, p) => ({ text: w, state: 'final' as const, key: `${seg.seq}:${p}` })),
+        ...seg.interimWords.map((w, p) => ({
+          text: w, state: 'interim' as const, key: `${seg.seq}:${seg.finalWords.length + p}`,
+        })),
       ];
       if (tokens.length === 0) continue;
 
@@ -293,16 +351,29 @@ export class CaptionEngine {
       });
     }
 
-    // Trim oldest turns until the estimated wrapped-line count fits the panel.
+    // Trim oldest turns to fit the panel — but smoothly. Two guards keep the
+    // window from "jumping":
+    //  • Hysteresis: don't start dropping until we're over budget by
+    //    TRIM_HYSTERESIS_LINES, so steady word-by-word growth doesn't thrash
+    //    the window. Once triggered, drop down to the budget.
+    //  • Never evict the live tail: we stop before removing the last turn (the
+    //    active one). A long monologue keeps its newest content on-screen; the
+    //    flat-string MAX_CHARS net in the renderer trims from the top within
+    //    that turn if it alone overflows, so the interim tail is never lost.
     const estLines = (t: CaptionTurn): number => {
       const tagLen = t.tag ? t.tag.length + 3 : 0;
       const chars = tagLen + t.finalText.length + (t.interimText ? t.interimText.length + 1 : 0);
       return Math.max(1, Math.ceil(chars / Math.max(8, approxCharsPerLine)));
     };
     let total = turns.reduce((n, t) => n + estLines(t), 0);
-    while (turns.length > 1 && total > maxVisualLines) {
-      total -= estLines(turns[0]);
-      turns.shift();
+    const dropThreshold = maxVisualLines + CaptionEngine.TRIM_HYSTERESIS_LINES;
+    if (total > dropThreshold) {
+      // Over the hysteresis band — roll the window down to the budget, but only
+      // by evicting fully-superseded older turns (never the last/active one).
+      while (turns.length > 1 && total > maxVisualLines) {
+        total -= estLines(turns[0]);
+        turns.shift();
+      }
     }
     return turns;
   }
@@ -320,16 +391,64 @@ export class CaptionEngine {
   }
 
   /**
-   * Get the segment to append to for `speaker`. We start a new segment when
-   * the speaker changes (a turn boundary), so each turn keeps its own tag and
-   * line. Consecutive same-speaker fragments merge into one segment.
+   * Resolve the segment to ingest into for `speaker`, given the fragment's
+   * `words`. Three cases:
+   *
+   *  1. Same speaker as the active turn → append to it (the common case;
+   *     consecutive same-speaker fragments merge into one turn/tag).
+   *
+   *  2. DIFFERENT speaker, but the fragment is a RE-DIARIZATION of the active
+   *     turn — Deepgram's streaming diarizer moved the *same words* to a new
+   *     index mid-utterance (it warns these indices are unstable: a speaker can
+   *     flip index). We must NOT open a second line, or the reader sees the
+   *     utterance twice under two tags ("[B] …" then "[Alice] …"). Instead we
+   *     relabel the existing segment in place: its words (and stable per-token
+   *     keys, since `seq` is preserved) stay put; only `speaker` flips, so the
+   *     next frame re-resolves the tag. Returned with isRelabel=true so the
+   *     caller appends only the new tail rather than duplicating the words.
+   *
+   *  3. DIFFERENT speaker with unrelated words → a genuine turn boundary; open
+   *     a new segment (its own tag + line), as before.
    */
-  private activeSegmentFor(speaker: number): Segment {
+  private segmentFor(speaker: number, words: string[]): { seg: Segment; isRelabel: boolean } {
     const last = this.segments[this.segments.length - 1];
-    if (last && last.speaker === speaker) return last;
-    const seg: Segment = { speaker, finalWords: [], interimWords: [] };
+    if (last && last.speaker === speaker) return { seg: last, isRelabel: false };
+
+    if (last && last.speaker >= 0 && speaker >= 0 && this.isRediarization(last, words)) {
+      last.speaker = speaker;
+      return { seg: last, isRelabel: true };
+    }
+
+    const seg: Segment = { seq: this.nextSeq++, speaker, finalWords: [], interimWords: [] };
     this.segments.push(seg);
-    return seg;
+    return { seg, isRelabel: false };
+  }
+
+  /**
+   * Decide whether an incoming fragment for a *different* index is the diarizer
+   * re-attributing the active turn's own words (same utterance, new index)
+   * rather than a new speaker's turn. True when the fragment and the segment's
+   * current words share a positional prefix: the shorter of the two sequences
+   * matches the other word-for-word from the start. Deepgram re-emits an
+   * utterance from its beginning, so a re-diarized fragment lines up positionally
+   * with what we already showed; an unrelated new turn does not.
+   *
+   * Requiring a *full*-prefix match (not just the first word) keeps a genuine
+   * new turn that happens to open with a repeated word ("Yeah…", "So…") from
+   * being swallowed into the previous speaker's line.
+   */
+  private isRediarization(seg: Segment, words: string[]): boolean {
+    if (words.length === 0) return false;
+    const existing = seg.finalWords.length > 0 || seg.interimWords.length > 0
+      ? [...seg.finalWords, ...seg.interimWords]
+      : [];
+    if (existing.length === 0) return false;
+
+    const n = Math.min(existing.length, words.length);
+    for (let i = 0; i < n; i++) {
+      if (existing[i] !== words[i]) return false;
+    }
+    return true;
   }
 
   private trim(): void {

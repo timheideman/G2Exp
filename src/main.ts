@@ -855,6 +855,31 @@ initNameAlertSettings();
 (window as any).__cal = () => app.showCalibrationGrid();
 (window as any).__fit = (lines: number, chars: number) => app.applyCaptionConfig(lines, chars);
 
+// Latency + cadence dev helpers (console or URL):
+//   __lat()            → enable + print rolling server→render latency stats
+//   __cadence(true)    → make the sim step at the real ~3fps glasses cadence
+// The server→render leg is the controllable middle; mic→server and
+// bridge→photons are measured separately (the latter with a 240fps clap test).
+(window as any).__lat = () => {
+  const stats = app.latency(true);
+  console.log(`[lat] server→render: median=${stats.medianMs ?? '—'}ms max=${stats.maxMs ?? '—'}ms (n=${stats.count})`);
+  return stats;
+};
+(window as any).__cadence = (on = true) => {
+  app.setSimCadencePreview(on);
+  console.log(`[cadence] sim ${on ? 'stepped to real ~3fps glasses cadence' : 'silky (immediate)'}`);
+};
+// Mic sensitivity (AGC) A/B helper:
+//   __agc()        → print live gain/level for the last audio buffer
+//   __agc(false)   → disable AGC (send raw mic) to compare distant-speech pickup
+//   __agc(true)    → re-enable. Default is ON. Affects the mic→Deepgram branch
+// only; the wake-word detector always sees raw PCM regardless.
+(window as any).__agc = (enable?: boolean) => {
+  const s = app.agc(enable);
+  console.log(`[agc] ${s.enabled ? 'ON' : 'OFF'} gain=${s.gain.toFixed(2)}× level=${s.level.toFixed(4)}${s.gated ? ' (gated: silence)' : ''}`);
+  return s;
+};
+
 // Companion-UI calibration controls (more reliable than the WebView console).
 function initCalibrationControls(): void {
   const btnCal = document.getElementById('btn-calibrate');
@@ -892,8 +917,17 @@ app.init().then(() => {
   // Initial WS wrap (may already be connected at this point)
   setTimeout(rewrapWsOnMessage, 100);
   // ?cal in the URL → show the calibration ruler on launch.
-  if (new URLSearchParams(location.search).has('cal')) {
+  const params = new URLSearchParams(location.search);
+  if (params.has('cal')) {
     setTimeout(() => app.showCalibrationGrid(), 600);
+  }
+  // ?lat → start collecting server→render latency immediately; print periodically.
+  if (params.has('lat')) {
+    app.latency(true);
+    setInterval(() => {
+      const s = app.latency(true);
+      if (s.count) console.log(`[lat] server→render median=${s.medianMs}ms max=${s.maxMs}ms (n=${s.count})`);
+    }, 3000);
   }
 }).catch((err) => {
   console.error('[LiveCaption] Failed to initialize:', err);

@@ -2,41 +2,33 @@
 
 > **⚠️ AGENT INSTRUCTION:** When this file is loaded, present the TODO list to Tim before taking any action. Ask what he wants to tackle. See `HANDOFF.md` for full context.
 
-## 🎯 NEXT SESSION — Make the caption UX feel fast & fluid
+## 🎯 NEXT SESSION — Feel-test smoothness, then optional deferred items
 
-The app now runs on real G2 glasses, fills the full canvas, and captions appear
-quickly. The next goal is **making the reading experience feel smooth and
-low-latency**, not jumpy. Tim's brief, verbatim:
+The caption-UX smoothness pass is **done in code** (see ✅ below). The headline
+"jumpy/flashy" root causes were all fixed and verified by tests + a headless sim
+driver. What's left is **Tim feel-testing it on the lens** (see the on-device
+checklist in `HANDOFF.md`), then optionally the two items Tim chose to **defer**:
+
+1. **Live sentence self-correction ("revisable tier")** — *deferred this
+   session by Tim* (the other 4 fixes deliver most of the felt improvement; this
+   one adds real engine complexity). Net-new work: a bounded tier between interim
+   and committed so the in-progress sentence can refine before it commits
+   (`REVISE_GRACE_MS≤800`, `COMMIT_AFTER_WORDS≤6`; freeze line = *committed*
+   words, not DG-`is_final`; renders identically-to-committed on glasses). The
+   token-id contract (`CaptionToken.key`, shipped this session) is already
+   designed for it: a revised word gets a NEW key / non-append.
+2. **Per-speaker horizontal tracks in the sim** — *deferred by Tim*, gated on
+   diarization robustness (the name-swapping bug is unverified). Give different
+   speakers different horizontal lanes for the slide-in. Revisit once diarization
+   is proven robust in a real room.
+
+Tim's original brief, verbatim (now addressed):
 
 > "lines just suddenly jump up when we give newer ones and words just suddenly
 > flash into view. We want to make this as fast as possible, as low latency as
 > possible. Maybe show words sooner and earlier. Increase the rate at which we
 > try to transcribe, and as we stream words we might want to correct sentences
 > as they form."
-
-Concrete workstreams (pick with Tim):
-
-1. **Smooth scroll instead of jump.** When a new line pushes content up, the
-   text currently snaps. Reference: broadcast/Japanese-TV live captions where
-   text slides in from the right / rolls up smoothly. On the glasses this is
-   constrained (text container, no animation API, ~3 updates/sec BLE ceiling) —
-   investigate what smooth motion is actually possible: character-by-character
-   reveal, line-by-line roll with intermediate frames, or a marquee-style feed.
-   The browser simulator can do true smooth scroll; the glasses may only
-   approximate it. Decide per-target.
-2. **Show words sooner / higher transcribe rate.** Interim text already streams
-   (smart_format is off), but push further: are interims arriving as fast as
-   Deepgram allows? Tune the client→server→DG chunking and the 300ms display
-   throttle (lower it? adaptive?). Measure real mic→lens latency end to end.
-3. **Live sentence correction as words form.** Today finalized words are locked
-   and never rewritten (anti-flicker). Tim wants the *opposite* for the live
-   tail: let the in-progress sentence visibly refine/correct as Deepgram revises
-   its hypothesis. Reconcile this with the flicker research — likely: allow the
-   *interim* (unlocked) region to correct freely + smoothly, keep *finalized*
-   text stable. May need to widen the "live" region beyond the current tail.
-4. **Re-tune anti-flicker for "fast" feel.** The current stabilization was tuned
-   to NEVER move text (fatigue research). Tim's feedback says it now reads as
-   "flashing/jumping." Find the balance: smooth transitions > hard stability.
 
 ## 🔴 Still needs on-device verification
 
@@ -73,7 +65,40 @@ Concrete workstreams (pick with Tim):
 
 ## ✅ Done
 
-### On-device milestone (this session)
+### Caption-UX smoothness pass (this session)
+Root causes of "lines jump / words flash" found via a 6-agent design workflow
+(4 mechanism experts → adversarial reconciliation → synthesis), then fixed:
+- [x] **Killed the display-throttle's self-perpetuating 300ms beat** — the free-
+      running cadence (re-armed after every flush) was misaligned with word
+      arrivals and made interims clump. Now the trailing flush fires relative to
+      the last real flush and doesn't auto-re-arm; leading edge kept (first word
+      instant), ≥300ms BLE floor kept. (`display-throttle.ts`)
+- [x] **Server→Deepgram time-flush (`DG_SEND_MAX_WAIT_MS=30`)** — a quiet
+      phrase's tail no longer waits to hit the 1600B batch; it forwards within
+      ~30ms. (`server/index.ts`)
+- [x] **Trim hysteresis (`TRIM_HYSTERESIS_LINES=2`) + monologue safety valve** —
+      the window holds steady through normal growth and rolls only at a real
+      overflow (no mid-sentence jump); a long single turn never loses its live
+      tail. (`caption-engine.ts buildTurns`)
+- [x] **Word-paced interim reveal (~2 words/BLE-tick)** — the live tail crawls in
+      instead of flashing; finals always snap in full (never delayed). New
+      `reveal-pacer.ts` (pure, clock-injectable, unit-tested); glasses-path only.
+- [x] **Stable per-token identity (`CaptionToken.key`)** — a word keeps its key
+      across interim re-slice and interim→final promotion, so the sim animates
+      only genuinely-new words and never re-fades settled text.
+- [x] **True smooth motion in the browser sim** — per-token fade-in + eased
+      scroll-baseline glide, via a **self-quiescing rAF loop** (animates only
+      while moving; idles to a slow blink, then to nothing — least phone compute,
+      per Tim). `setMatchGlassesCadence()` A/Bs silky vs real ~3fps.
+      (`display-simulator.ts`)
+- [x] **`?lat` latency instrumentation** + `__lat()` / `__cadence()` console
+      helpers (server→render leg; bridge→photons stays a 240fps clap test).
+- [x] Corrected the misleading "flicker-free partial-update" comment — the
+      glasses path is a full-content replace; a true tail-splice is a future
+      on-device probe.
+- [x] **229 tests** (was 209), typecheck + build + pack all clean.
+
+### On-device milestone (prior session)
 - [x] App loads & runs on real G2 via `evenhub qr` sideload
 - [x] **Full-canvas captions** — stopped pre-wrapping; the firmware wraps to the
       real panel width (was leaving the right side empty)

@@ -55,11 +55,16 @@ export class DisplayThrottle {
 
     const elapsed = this.now() - this.lastFlushAt;
     if (this.timer === null && elapsed >= this.intervalMs) {
-      // Interval already satisfied — flush now (leading edge).
+      // Interval already satisfied — flush now (leading edge). We do NOT arm a
+      // trailing timer here: with nothing pending there's nothing to flush, and
+      // a free-running timer is exactly the "beat" that made captions clump
+      // (it fired on a fixed 300ms grid misaligned with word arrivals). The
+      // next push() within the interval re-arms it for the remaining time.
       this.doFlush(value);
-      this.armTrailing();
     } else {
-      // Within the interval — coalesce; newest wins.
+      // Within the interval — coalesce; newest wins. Schedule a single trailing
+      // flush for when the interval actually elapses (relative to the last real
+      // flush), so push spacing never drops below the BLE-safe floor.
       this.pending = value;
       this.armTrailing();
     }
@@ -86,15 +91,25 @@ export class DisplayThrottle {
 
   private armTrailing(): void {
     if (this.timer !== null) return;
+    // Fire when the interval elapses relative to the LAST real flush, not a
+    // fresh full interval from "now" — so a value that arrives late in the
+    // window isn't delayed by an extra ~300ms, and spacing between flushes
+    // stays exactly the BLE floor. (lastFlushAt is -Infinity before the first
+    // flush, which would underflow; in that case use the full interval.)
+    const sinceFlush = this.now() - this.lastFlushAt;
+    const wait = Number.isFinite(sinceFlush)
+      ? Math.max(0, this.intervalMs - sinceFlush)
+      : this.intervalMs;
     this.timer = setTimeout(() => {
       this.timer = null;
       if (this.pending !== null && this.pending !== this.lastSent) {
         this.doFlush(this.pending);
         this.pending = null;
-        // Something was flushed — keep the cadence going in case more arrives.
-        this.armTrailing();
       }
-    }, this.intervalMs);
+      // No auto-re-arm: once pending is drained we stop. The next push()
+      // re-arms the cadence. This is what stops the self-perpetuating beat
+      // after the word stream goes quiet.
+    }, wait);
   }
 
   private doFlush(value: string): void {

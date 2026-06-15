@@ -135,6 +135,172 @@ describe('CaptionEngine', () => {
     });
   });
 
+  describe('stable per-token keys (for sim animation)', () => {
+    it('assigns a key to every token in a frame', () => {
+      engine.addFinal(0, 'hello world');
+      const f = engine.buildFrame();
+      const tokens = f.lines.flatMap((l) => l.tokens);
+      expect(tokens.every((t) => typeof t.key === 'string' && t.key.length > 0)).toBe(true);
+    });
+
+    it('keeps a word’s key stable when its interim is promoted to final', () => {
+      engine.updateInterim(0, 'one two three');
+      const keyOf = (txt: string, f = engine.buildFrame()) =>
+        f.lines.flatMap((l) => l.tokens).find((t) => t.text === txt)?.key;
+      const beforeTwo = keyOf('two');
+      engine.onUtteranceEnd(); // interim → final in place
+      const afterTwo = keyOf('two');
+      expect(afterTwo).toBe(beforeTwo); // same identity ⇒ renderer won't re-fade
+    });
+
+    it('gives different turns distinct key namespaces (no cross-turn collision)', () => {
+      engine.addFinal(0, 'alpha');
+      engine.addFinal(1, 'alpha'); // same word, different turn
+      const f = engine.buildFrame();
+      const keys = f.lines.flatMap((l) => l.tokens).map((t) => t.key);
+      expect(new Set(keys).size).toBe(keys.length); // all unique
+    });
+  });
+
+  describe('buildTurns (unwrapped glasses window + smooth trim)', () => {
+    // 38 chars/line is the real glasses geometry; 7 visual lines the budget.
+    const CPL = 38;
+    const BUDGET = 7;
+
+    it('returns one entry per speaker turn, full-width (no pre-wrap)', () => {
+      engine.addFinal(0, 'hello there how are you doing today');
+      engine.addFinal(1, 'i am doing very well thanks for asking');
+      const turns = engine.buildTurns(CPL, BUDGET);
+      expect(turns).toHaveLength(2);
+      // Whole turn on one logical line — the firmware wraps it, not us.
+      expect(turns[0].finalText).toBe('hello there how are you doing today');
+      expect(turns[0].tag).toBe('A');
+      expect(turns[1].tag).toBe('B');
+    });
+
+    it('keeps the live interim tail visible when far more turns exist than fit', () => {
+      // Many short turns from alternating speakers — more than the panel holds —
+      // then the newest speaker is mid-utterance with a live interim tail.
+      for (let i = 0; i < 12; i++) {
+        engine.addFinal(i, `turn number ${i} with a fair amount of padding words here`);
+      }
+      // A fresh turn whose interim extends its own (empty) finals.
+      engine.updateInterim(99, 'and this is the still being recognized live tail right now');
+      const turns = engine.buildTurns(CPL, BUDGET);
+      // The active turn (with the interim) is never evicted, even though older
+      // turns had to roll off to fit.
+      const last = turns[turns.length - 1];
+      expect(last.isCurrentSpeaker).toBe(true);
+      expect(last.interimText).toContain('live tail right now');
+      // And the window did roll (oldest turns dropped).
+      expect(turns.some((t) => t.finalText.includes('turn number 0'))).toBe(false);
+    });
+
+    it('applies hysteresis: does not drop a turn the instant it crosses budget', () => {
+      // Build a window sitting exactly at the budget across several short turns.
+      // Each ~one line. At BUDGET turns we're at the edge; one more should be
+      // absorbed by the hysteresis band rather than immediately evicting turn 0.
+      for (let i = 0; i < BUDGET; i++) {
+        engine.addFinal(i, `line ${i}`);
+      }
+      const atBudget = engine.buildTurns(CPL, BUDGET);
+      expect(atBudget).toHaveLength(BUDGET);
+      // One more single-line turn: total = BUDGET+1 ≤ BUDGET+HYSTERESIS(2) ⇒ kept.
+      engine.addFinal(BUDGET, `line ${BUDGET}`);
+      const overByOne = engine.buildTurns(CPL, BUDGET);
+      expect(overByOne).toHaveLength(BUDGET + 1); // not yet trimmed
+      // The oldest turn is still present (no thrash).
+      expect(overByOne[0].finalText).toBe('line 0');
+    });
+
+    it('rolls the window down to budget once past the hysteresis band', () => {
+      // Push well past budget + hysteresis with single-line turns.
+      for (let i = 0; i < BUDGET + 6; i++) {
+        engine.addFinal(i, `line ${i}`);
+      }
+      const turns = engine.buildTurns(CPL, BUDGET);
+      // Trimmed back toward the budget (not the full history), newest kept.
+      expect(turns.length).toBeLessThanOrEqual(BUDGET + 1);
+      expect(turns[turns.length - 1].finalText).toBe(`line ${BUDGET + 5}`);
+      // Oldest content rolled off the top.
+      expect(turns.some((t) => t.finalText === 'line 0')).toBe(false);
+    });
+  });
+
+  /**
+   * Regression: mid-utterance speaker RE-DIARIZATION.
+   *
+   * Deepgram's streaming diarizer emits unstable indices — it routinely starts a
+   * phrase under one index and, with more audio context, re-attributes the SAME
+   * words to another index (which a voiceprint then names). The bug: the engine
+   * treated the new index as a new turn and rendered the utterance twice —
+   * "[B] Great weather today!  [Alice] Great weather today!". The fix relabels
+   * the existing turn in place (tag flips B→Alice; text and token keys untouched).
+   */
+  describe('speaker re-diarization (relabel in place, no duplicate line)', () => {
+    const textOf = (e: CaptionEngine) =>
+      e.buildFrame().lines.map((l) => `${l.tag ? `[${l.tag}] ` : ''}${l.tokens.map((t) => t.text).join(' ')}`);
+
+    it('relabels a finalized turn when the same words are re-diarized to a new index', () => {
+      engine.addFinal(1, 'Great weather today');      // diarizer's first guess → [B]
+      engine.addFinal(0, 'Great weather today');      // re-attributed to index 0 → [A]
+      const lines = textOf(engine);
+      // ONE line, now under the corrected tag — not two duplicates.
+      expect(lines).toEqual(['[A] Great weather today']);
+    });
+
+    it('keeps the relabeled turn under one tag and one speaker', () => {
+      engine.addFinal(1, 'Great weather today');
+      engine.addFinal(0, 'Great weather today');
+      const f = engine.buildFrame();
+      expect(f.lines).toHaveLength(1);
+      expect(f.lines[0].speaker).toBe(0);
+      expect(engine.activeSpeaker).toBe(0);
+    });
+
+    it('preserves stable token keys across the relabel (renderer will not re-fade)', () => {
+      engine.addFinal(1, 'Great weather today');
+      const keyBefore = engine.buildFrame().lines[0].tokens.find((t) => t.text === 'weather')!.key;
+      engine.addFinal(0, 'Great weather today');     // relabel in place
+      const keyAfter = engine.buildFrame().lines[0].tokens.find((t) => t.text === 'weather')!.key;
+      expect(keyAfter).toBe(keyBefore);
+    });
+
+    it('relabels mid-stream on an interim re-diarization, without duplicating words', () => {
+      engine.updateInterim(1, 'great weather');            // streaming under [B]
+      engine.updateInterim(0, 'great weather today');      // re-diarized to [A], extended
+      const lines = textOf(engine);
+      expect(lines).toEqual(['[A] great weather today']);
+    });
+
+    it('extends the turn when the re-diarized final adds more words', () => {
+      engine.addFinal(1, 'great weather');
+      engine.addFinal(0, 'great weather today everyone');  // same start, longer
+      const f = engine.buildFrame();
+      // One relabeled turn (single tag); words present once, in order — no
+      // "great weather great weather" duplication of the overlapping prefix.
+      expect(f.lines.filter((l) => l.tag !== null)).toHaveLength(1);
+      expect(f.lines[0].speaker).toBe(0);
+      const words = f.lines.flatMap((l) => l.tokens.map((t) => t.text));
+      expect(words).toEqual(['great', 'weather', 'today', 'everyone']);
+    });
+
+    it('still opens a NEW turn when a different speaker says different words', () => {
+      engine.addFinal(0, 'Hi there');
+      engine.addFinal(1, 'Great weather today');           // genuinely new turn
+      const lines = textOf(engine);
+      expect(lines).toEqual(['[A] Hi there', '[B] Great weather today']);
+    });
+
+    it('does not swallow a new turn that merely opens with a repeated word', () => {
+      engine.addFinal(0, 'so anyway that was fun');
+      engine.addFinal(1, 'so what do you think');          // shares only "so"
+      const f = engine.buildFrame();
+      // Two distinct turns — a single shared leading word is not a re-diarization.
+      expect(f.lines.map((l) => l.speaker)).toEqual([0, 1]);
+    });
+  });
+
   describe('clear', () => {
     it('resets all state', () => {
       engine.addFinal(0, 'hello');

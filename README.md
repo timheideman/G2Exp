@@ -12,9 +12,12 @@ G2 mic (16kHz PCM) → Phone WebView → WebSocket → Server → Deepgram Nova-
 
 - **4-mic array** captures ambient speech
 - **Deepgram Nova-3** provides real-time transcription with diarization
-- **Stabilized captions** roll on the glasses in a fixed 3-line window — finalized
-  words never reflow, only the live tail changes (flicker-free, the key to
-  comfortable reading on a HUD)
+- **Stabilized captions** roll on the glasses — finalized words never reflow,
+  only the live tail changes (flicker-free, the key to comfortable reading on a
+  HUD). The live tail is **word-paced** so it crawls in smoothly rather than
+  flashing, and the window rolls at phrase boundaries (hysteresis) instead of
+  jumping mid-sentence. The browser preview adds true fade-in + smooth scroll
+  (the glasses' fixed firmware font + ~3 updates/sec cap a *stepped* reveal)
 - **Speaker identification** puts known names to voices for group conversations,
   with turn markers and current-speaker emphasis. Robust to Deepgram's unstable
   diarization indices (see [docs/SPEAKER_ID.md](docs/SPEAKER_ID.md))
@@ -110,6 +113,13 @@ npx evenhub qr --url "http://<LAN-IP>:5173"   # phone + laptop on same Wi-Fi
 ```
 In the Even phone app → **Even Hub** tab → **Scan QR**. The app renders on the
 glasses within ~1s. See `HANDOFF.md` for the full runbook and failure table.
+
+**Dev flags / console helpers** (WebView console or URL):
+- `?lat` / `__lat()` — rolling server→render latency (the controllable middle
+  leg; mic→server and bridge→photons are measured separately)
+- `__cadence(true)` — step the browser preview to the real ~3fps glasses cadence
+  to A/B "ideal smooth" vs. "what the lens actually shows"
+- `?cal` / `__cal()` + `__fit(lines, chars)` — display-fit calibration
 
 ## G2 Controls
 

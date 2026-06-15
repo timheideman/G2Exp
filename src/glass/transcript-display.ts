@@ -26,6 +26,7 @@ import {
   type CaptionEngineConfig,
   type CaptureState,
 } from './caption-engine';
+import { RevealPacer } from './reveal-pacer';
 
 // G2 display constraints (research-validated against the SDK):
 //   576×288 px canvas, fixed firmware font, ~35–40 chars/line × up to ~12 lines.
@@ -45,10 +46,17 @@ export class TranscriptDisplay {
   private status: CaptureState = 'connecting';
   /** Local mirror of the layout config (used to bound the glasses turn window). */
   private config: { maxLines: number; maxLineChars: number };
+  /**
+   * Paces the interim tail on the GLASSES path so a burst of new words crawls
+   * in (~2 per BLE tick) instead of flashing. Glasses-only — the sim shows full
+   * text. Injectable clock for tests.
+   */
+  private revealPacer: RevealPacer;
 
-  constructor(config?: Partial<CaptionEngineConfig>) {
+  constructor(config?: Partial<CaptionEngineConfig>, now: () => number = Date.now) {
     this.engine = new CaptionEngine(config);
     this.config = { maxLines: config?.maxLines ?? 7, maxLineChars: config?.maxLineChars ?? 40 };
+    this.revealPacer = new RevealPacer(2, 300, now);
     // The engine resolves tags through our name resolver / letter fallback.
     this.engine.setTagResolver((idx) => this.tagFor(idx));
   }
@@ -153,7 +161,7 @@ export class TranscriptDisplay {
    *  - The whole turn's text on one logical line; the firmware wraps it.
    *  - A trailing " ━" while the turn is still being recognized.
    */
-  render(): string {
+  render(opts: { paceReveal?: boolean } = {}): string {
     const effectiveStatus: CaptureState = this.paused ? 'paused' : this.status;
 
     // Approx panel geometry only used to bound how many turns we keep — NOT to
@@ -161,6 +169,22 @@ export class TranscriptDisplay {
     const approxCharsPerLine = this.config.maxLineChars;
     const maxVisualLines = this.config.maxLines;
     const turns = this.engine.buildTurns(approxCharsPerLine, maxVisualLines);
+
+    // Reveal-pacing (glasses only): crawl the active turn's interim tail in a
+    // few words per BLE tick instead of flashing a whole burst. The active turn
+    // is the LAST one; only its interim is paced. Finals are never paced (the
+    // engine clears interim on a final, so finalized text shows in full at once).
+    // When pacing is off (sim / tests), the pacer is untouched.
+    if (opts.paceReveal && turns.length > 0) {
+      const active = turns[turns.length - 1];
+      if (active.interimText) {
+        const words = active.interimText.split(' ');
+        const show = this.revealPacer.visibleCount(words.length);
+        active.interimText = words.slice(0, show).join(' ');
+      } else {
+        this.revealPacer.visibleCount(0); // keep the pacer's run-state in sync
+      }
+    }
 
     if (turns.length === 0) {
       const hint = statusHint(effectiveStatus);
@@ -171,12 +195,23 @@ export class TranscriptDisplay {
     const banner = statusBanner(effectiveStatus);
     if (banner) output += `${banner}\n`;
 
+    // Print the [Tag] only when the speaker CHANGES from the previous turn, so a
+    // run of consecutive same-speaker turns reads as one labelled block, not a
+    // tag stamped on every line. The engine deliberately splits a speaker's
+    // successive sentences into separate turns (so each new utterance gets its
+    // own fresh interim tail — the streaming fix), but visually they're the same
+    // person still talking, so the label should persist, not repeat. A system
+    // notice (speaker -1) or a genuine different speaker breaks the run and the
+    // next same-speaker turn re-prints its tag.
+    let lastSpeaker: number | null = null;
     for (const turn of turns) {
-      const prefix = turn.tag !== null && turn.speaker >= 0 ? `[${turn.tag}] ` : '';
+      const sameAsPrev = turn.speaker >= 0 && turn.speaker === lastSpeaker;
+      const prefix = turn.tag !== null && turn.speaker >= 0 && !sameAsPrev ? `[${turn.tag}] ` : '';
       const text = turn.interimText
         ? `${turn.finalText}${turn.finalText ? ' ' : ''}${turn.interimText} ━`
         : turn.finalText;
       output += `${prefix}${text}\n`;
+      lastSpeaker = turn.speaker;
     }
 
     // Safety net: keep the flat string under the container ceiling.
@@ -189,6 +224,16 @@ export class TranscriptDisplay {
     return output;
   }
 
+  /**
+   * Whether the glasses reveal pacer is mid-crawl — i.e. the active turn's
+   * interim has more recognized words than are currently shown. The app uses
+   * this to schedule a follow-up render so a burst's tail keeps revealing even
+   * if no new transcript message arrives.
+   */
+  hasPendingReveal(): boolean {
+    return this.revealPacer.hasPending();
+  }
+
   /** Get current speaker labels for the companion UI */
   getSpeakers(): SpeakerLabel[] {
     return Array.from(this.speakerLabels.values());
@@ -199,6 +244,7 @@ export class TranscriptDisplay {
     this.engine.clear();
     this.speakerLabels.clear();
     this.nextSpeakerIndex = 0;
+    this.revealPacer.reset();
   }
 }
 

@@ -19,6 +19,7 @@ import { SettingsManager } from './settings-manager';
 import { ReconnectScheduler } from './settings-manager';
 import { NameAlertDetector } from './name-alert-detector';
 import { DisplayThrottle } from './display-throttle';
+import { MicAgc } from './mic-agc';
 import type { LiveCaptionSettings, ConfigMessage } from '../types/settings';
 import type { CaptureState } from './caption-engine';
 
@@ -48,6 +49,20 @@ function resolveWsUrl(): string {
   return `ws://${window.location.hostname}:8080`;
 }
 const WS_URL = resolveWsUrl();
+
+/**
+ * Mic-AGC is ON by default (it IS the distant-speech fix). For an on-device A/B
+ * — "does AGC help or is it adding noise?" — disable it with ?agc=off in the URL
+ * or localStorage.setItem('agc','off'). Anything else (incl. absent) → enabled.
+ */
+function isAgcEnabled(): boolean {
+  try {
+    if (new URLSearchParams(location.search).get('agc') === 'off') return false;
+    return localStorage.getItem('agc') !== 'off';
+  } catch {
+    return true;
+  }
+}
 
 type AppMode = 'glasses' | 'browser';
 
@@ -80,6 +95,19 @@ export class LiveCaptionApp {
   readonly settings = new SettingsManager();
 
   private nameAlert = new NameAlertDetector();
+
+  /**
+   * Automatic gain control for the mic→Deepgram audio branch ONLY. The G2 hands
+   * us raw PCM with no gain control (audioControl is on/off), so a faint/distant
+   * talker arrives below Deepgram's VAD floor and never gets captioned — the
+   * "I can only talk to people right in front of me" symptom. AGC lifts quiet
+   * speech toward a target loudness (lift-only, soft-limited). On the laptop the
+   * browser's autoGainControl already does this, which is why it only bit on the
+   * glasses. The wake-word detector is deliberately fed the RAW PCM, not this.
+   * Disable for an on-device A/B with ?agc=off (defaults ON — it's the fix).
+   */
+  private micAgc = new MicAgc();
+  private agcEnabled = isAgcEnabled();
 
   // Callbacks for UI integration
   onStatusChange?: (status: string, connected: boolean) => void;
@@ -219,9 +247,13 @@ export class LiveCaptionApp {
           console.log(`[LiveCaption] First glasses audio chunk: ${pcm.byteLength} bytes`);
         }
         if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send(pcm);
+          // Lift quiet/distant speech toward Deepgram's floor before sending.
+          // AGC is applied to the WS copy ONLY — the wake-word detector below
+          // gets the raw PCM so its sensitivity tuning is untouched.
+          this.ws.send(this.agcEnabled ? this.micAgc.process(pcm) : pcm);
         }
         // Feed the wake-word detector regardless of WS state (it's on-device).
+        // RAW pcm by design — never the gain-adjusted buffer.
         this.nameAlert.process(pcm);
       }
       const eventType = event.textEvent?.eventType ?? event.sysEvent?.eventType;
@@ -298,8 +330,15 @@ export class LiveCaptionApp {
   private async updateGlassesDisplay(text: string): Promise<void> {
     try {
       const { TextContainerUpgrade } = this.sdk;
-      // Partial-update path (textContainerUpgrade) — the flicker-free way to
-      // refresh a text container without rebuilding the whole page.
+      // textContainerUpgrade refreshes the text container WITHOUT rebuilding the
+      // whole page (cheaper than recreating the startup container). Note: this
+      // is a FULL-CONTENT replace — contentOffset:0, contentLength:full. The SDK
+      // *exposes* contentOffset/contentLength for a true suffix-splice (send only
+      // the changed tail), but whether the firmware splices vs. re-wraps on a
+      // partial offset is unverified on-device, so we send the whole string and
+      // let the firmware word-wrap it. A flag-gated tail-diff is a future probe
+      // (see HANDOFF "on-device probes"). Update spacing is already BLE-safe via
+      // the 300ms display throttle upstream.
       await this.bridge.textContainerUpgrade(new TextContainerUpgrade({
         containerID: this.containerId,
         containerName: this.containerName,
@@ -435,20 +474,79 @@ export class LiveCaptionApp {
         this.display.onUtteranceEnd();
         break;
     }
+    // Latency instrumentation (?lat): the server stamps each transcript message
+    // with Date.now(); the server→render leg is (now − stamp). The mic→server
+    // and bridge→photons legs are measured separately (the latter physically,
+    // with a 240fps clap/flash test) — this captures the controllable middle.
+    if (this.latEnabled && typeof msg.timestamp === 'number') {
+      const leg = Date.now() - msg.timestamp;
+      if (leg >= 0 && leg < 10000) {
+        this.latSamples.push(leg);
+        if (this.latSamples.length > 30) this.latSamples.shift();
+      }
+    }
     // Transcript is flowing — we're definitively live.
     if (this.isListening) this.display.setStatus('listening');
     this.updateDisplay();
+  }
+
+  // ─── Latency instrumentation + sim cadence preview (dev helpers) ──
+
+  private latEnabled = false;
+  private latSamples: number[] = [];
+
+  /** Enable/report the server→render latency overlay. Returns rolling stats. */
+  latency(enable = true): { enabled: boolean; count: number; medianMs: number | null; maxMs: number | null } {
+    this.latEnabled = enable;
+    const s = [...this.latSamples].sort((a, b) => a - b);
+    const median = s.length ? s[Math.floor(s.length / 2)] : null;
+    const max = s.length ? s[s.length - 1] : null;
+    return { enabled: this.latEnabled, count: s.length, medianMs: median, maxMs: max };
+  }
+
+  /** Toggle the sim's "match real ~3fps glasses cadence" A/B preview. */
+  setSimCadencePreview(on: boolean): void {
+    this.displaySim?.setMatchGlassesCadence(on);
+  }
+
+  /**
+   * Mic-AGC dev control (on-device A/B for the sensitivity fix). With no arg,
+   * just reports the live gain/level/gated readout for the last audio buffer;
+   * pass true/false to toggle AGC at runtime so you can hear/see the difference
+   * between "raw" and "lifted" without a reload. Returns the current state.
+   */
+  agc(enable?: boolean): { enabled: boolean; gain: number; level: number; gated: boolean } {
+    if (typeof enable === 'boolean') this.agcEnabled = enable;
+    const s = this.micAgc.stats();
+    return { enabled: this.agcEnabled, gain: s.appliedGain, level: s.level, gated: s.gated };
   }
 
   private updateDisplay(): void {
     // Hold the calibration ruler on screen — don't let captions overwrite it.
     if (this.calibrationActive) return;
 
-    const text = this.display.render();
+    // Pace the interim reveal only on the glasses path (BLE-rate refresh); the
+    // sim renders full text and animates the entry itself.
+    const onGlasses = this.mode === 'glasses';
+    const text = this.display.render({ paceReveal: onGlasses });
+
+    // Keep the reveal crawl alive BEFORE the text-changed guard. The pacer
+    // reveals only a couple of words per BLE tick, so when speech streams in
+    // faster than that, two back-to-back renders legitimately produce the SAME
+    // visible string (the pacer hasn't advanced yet) — and an inbound interim
+    // can land inside the tick window doing exactly that. If we only re-armed
+    // the follow-up tick on the changed-text path (below the guard), that
+    // identical render would bail early and silently kill the crawl: the screen
+    // would then only move when the next transcript message happened to change
+    // it — i.e. at the next pause/final. So while the pacer has pending words,
+    // we always ensure a follow-up tick is scheduled, regardless of whether
+    // THIS render changed anything. (Glasses path only; the sim isn't paced.)
+    if (onGlasses) this.scheduleRevealTick();
+
     if (text === this.lastRenderedText) return;
     this.lastRenderedText = text;
 
-    if (this.mode === 'glasses') {
+    if (onGlasses) {
       // Glasses bridge accepts a flat string; throttle pushes to the
       // BLE-safe rate so frequent caption updates don't saturate the link.
       this.pushGlassesText(text);
@@ -462,11 +560,26 @@ export class LiveCaptionApp {
     }
   }
 
+  /** Pending follow-up render so a paced interim crawl finishes without a new msg. */
+  private revealTickTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private scheduleRevealTick(): void {
+    if (this.revealTickTimer !== null) return;
+    if (!this.display.hasPendingReveal()) return;
+    this.revealTickTimer = setTimeout(() => {
+      this.revealTickTimer = null;
+      this.updateDisplay();
+    }, GLASSES_UPDATE_INTERVAL_MS);
+  }
+
   private async toggleListening(): Promise<void> {
     if (this.mode === 'glasses') {
       if (this.isListening) {
         await this.bridge!.audioControl(false);
         this.isListening = false;
+        // Drop the AGC envelope/gain so resume re-ramps from unity rather than
+        // a stale frozen gain captured at the moment we paused.
+        this.micAgc.reset();
         this.display.setPaused(true);
         this.setStatus('Paused', false);
         this.setCaptureState('paused');
@@ -565,6 +678,10 @@ export class LiveCaptionApp {
   async destroy(): Promise<void> {
     this.reconnectScheduler.cancel();
     this.glassesThrottle.cancel();
+    if (this.revealTickTimer !== null) {
+      clearTimeout(this.revealTickTimer);
+      this.revealTickTimer = null;
+    }
     this.displaySim?.destroy();
     await this.browserAudio?.stop();
     if (this.mode === 'glasses') {

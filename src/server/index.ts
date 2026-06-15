@@ -57,6 +57,13 @@ const SEGMENT_MIN_MS = 1500;    // embed a segment after ~1.5s of that speaker's
 // → 1600 bytes/50ms). Stays in DG's recommended 20–100ms buffer band.
 const DG_SEND_BATCH_BYTES = 1600;
 
+// Time-based flush for the coalescer: if bytes are buffered but haven't reached
+// the batch size, forward them after this long anyway. Without it, the last
+// partial buffer of a quiet phrase (the very words the reader is waiting on)
+// waits for the NEXT chunk to cross the threshold — adding ragged latency to
+// the final interim. 30ms keeps us inside DG's 20–100ms band.
+const DG_SEND_MAX_WAIT_MS = 30;
+
 // ─── Ring buffer sizes ───────────────────────────────────────────────────────
 const BYTES_PER_SEC = 16000 * 2;              // 16 kHz, 16-bit
 const GLOBAL_RING_BYTES = BYTES_PER_SEC * 35; // 35s global buffer (for time-range extraction)
@@ -185,6 +192,9 @@ wss.on('connection', (clientWs: WebSocket) => {
   // Deepgram send-coalescing buffer (batches ~10ms frames into ~50ms packets).
   let dgSendBuffer: Buffer[] = [];
   let dgSendBufferBytes = 0;
+  // Time-based flush timer for a partial buffer that hasn't reached the batch
+  // size (so a quiet phrase's tail isn't stranded waiting for the next chunk).
+  let dgSendTimer: ReturnType<typeof setTimeout> | null = null;
   let closing = false;
 
   // ── Enrollment state ────────────────────────────────────────
@@ -541,10 +551,19 @@ wss.on('connection', (clientWs: WebSocket) => {
     dgSendBufferBytes += data.byteLength;
     if (dgSendBufferBytes >= DG_SEND_BATCH_BYTES) {
       flushDgSendBuffer();
+    } else if (dgSendTimer === null) {
+      // Partial buffer — guarantee it reaches Deepgram within DG_SEND_MAX_WAIT_MS
+      // even if no further chunk arrives to cross the batch threshold. This is
+      // what keeps the last word of a quiet phrase from stalling.
+      dgSendTimer = setTimeout(flushDgSendBuffer, DG_SEND_MAX_WAIT_MS);
     }
   }
 
   function flushDgSendBuffer(): void {
+    if (dgSendTimer !== null) {
+      clearTimeout(dgSendTimer);
+      dgSendTimer = null;
+    }
     if (dgSendBuffer.length === 0) return;
     if (!isDeepgramOpen || !dgConnection) {
       // Not ready yet — keep buffering (bounded by the caller cadence).
@@ -810,6 +829,10 @@ wss.on('connection', (clientWs: WebSocket) => {
     closing = true;
     enrollmentMode = false;
     stopKeepalive();
+    if (dgSendTimer !== null) {
+      clearTimeout(dgSendTimer);
+      dgSendTimer = null;
+    }
     if (dgConnection && isDeepgramOpen) {
       try { dgConnection.requestClose(); } catch {}
     }

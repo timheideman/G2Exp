@@ -24,17 +24,22 @@ pipeline.
 > prod); the 25MB neural-embedder model, if enabled, lives on the server only.
 >
 > It already **runs on real G2 hardware** via `evenhub qr` sideload, fills the
-> full display canvas, and captions appear quickly. **209 tests pass; typecheck
-> and build are clean.** Read `HANDOFF.md` and `TODO.md` first.
+> full display canvas, and captions appear quickly. The caption-UX smoothness
+> pass is **done in code** (smooth-feel fixes below); **229 tests pass;
+> typecheck and build are clean.** Read `HANDOFF.md` and `TODO.md` first.
 >
-> **Focus for this session:** make the caption reading experience feel **fast and
-> fluid**, not jumpy. Right now lines snap upward and words flash in. I want:
-> lower latency, words shown sooner, a higher transcribe/update rate, smooth
-> motion (think broadcast / Japanese-TV live captions that slide in), and the
-> live sentence to visibly **correct itself as it forms** (while keeping
-> finalized text stable). See the "NEXT SESSION" section of `TODO.md`. Verify
-> changes against the browser simulator AND describe what to check on-device — I
-> (Tim) am the on-glasses tester.
+> **What just shipped (caption-UX smoothness, needs on-device feel-testing):**
+> killed the display-throttle's self-perpetuating 300ms beat (clumping), added a
+> 30ms server→Deepgram time-flush (sooner words), trim hysteresis so lines roll
+> at phrase boundaries instead of jumping mid-sentence, word-paced interim reveal
+> (~2 words/BLE-tick so the tail crawls instead of flashing — finals never
+> delayed), true smooth fade+glide in the **browser sim only** (self-quiescing
+> rAF = zero idle CPU), and `?lat` latency instrumentation. The on-glasses font
+> can't animate, so the lens gets a clean *stepped* reveal, not silky motion.
+> **Focus for THIS session:** feel-test those on the lens (checklist below),
+> then optionally pick up the two DEFERRED items — live sentence self-correction
+> (the "revisable tier") and per-speaker horizontal tracks. Verify in the sim AND
+> describe what to check on-device — I (Tim) am the on-glasses tester.
 
 ---
 
@@ -58,8 +63,10 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
 |---|---|
 | `src/glass/caption-engine.ts` | **Pure caption core** — rolling window, interim stabilization. `buildFrame()` (pixel-wrapped, for the browser sim) and `buildTurns()` (unwrapped full-width, for the glasses). Fully unit-tested. |
 | `src/glass/transcript-display.ts` | Adapter over the engine. `render()` → flat string for the glasses text container (one full-width line per turn — the firmware wraps it). `renderFrame()` → structured frame for the sim. |
-| `src/glass/app.ts` | Orchestration: bridge/audio/WS/display, capture-state, BLE-safe display throttle, calibration. `GLASSES_CAPTION_CONFIG` / `BROWSER_CAPTION_CONFIG` set the layout. |
-| `src/glass/display-simulator.ts` | Browser canvas renderer (monochrome emphasis, pixel-wrap). The sim font is *scalable*; the real G2 font is *fixed* — don't trust the sim for absolute size. |
+| `src/glass/app.ts` | Orchestration: bridge/audio/WS/display, capture-state, BLE-safe display throttle, calibration. `GLASSES_CAPTION_CONFIG` / `BROWSER_CAPTION_CONFIG` set the layout. Reveal-pacing wired here (glasses path only); `?lat` latency + `__cadence()` sim-preview helpers. |
+| `src/glass/reveal-pacer.ts` | **Word-paced interim reveal** for the glasses path: crawls ~2 new interim words per BLE tick so the tail doesn't flash. Interim-only; finals snap in full. Pure + clock-injectable, unit-tested. |
+| `src/glass/display-throttle.ts` | BLE-safe newest-wins coalescing (300ms). Now fires the trailing flush relative to the last real flush and does NOT self-re-arm a fresh beat (that beat was a clumping source). Leading edge kept (first word instant). |
+| `src/glass/display-simulator.ts` | Browser canvas renderer. Now does **true smooth motion** (per-token fade-in keyed by `CaptionToken.key`, eased scroll-baseline glide) via a **self-quiescing rAF loop** — animates only while something moves, idles to a slow blink timer, then to *nothing* (least phone compute). `setMatchGlassesCadence(on)` A/Bs silky-vs-real-3fps. Sim font is *scalable*; the real G2 font is *fixed* — don't trust the sim for absolute size OR for the lens's update smoothness. |
 | `src/server/index.ts` | WS proxy → Deepgram; per-turn audio extraction; feeds the speaker pipeline. Deepgram config + audio coalescing live here. |
 | `src/server/speaker-identity-resolver.ts` | Robust Deepgram-index → name mapping (online centroids + global assignment + hysteresis). |
 | `src/server/vad.ts`, `enrollment-quality.ts`, `real-embedding-provider.ts`, `onnx-embedding-provider.ts`, `kaldi-fbank.ts` | Speaker-ID building blocks. See `docs/SPEAKER_ID.md`. |
@@ -89,6 +96,25 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
   the `g2-microphone` permission (array-of-objects shape — see `app.json`).
 - **`evenhub qr` doesn't read `app.json`** (sideload), but `evenhub pack` does
   (and validates strictly). The manifest is now pack-valid.
+- **`textContainerUpgrade` is a FULL-content replace today** (`contentOffset:0,
+  contentLength:full`). The SDK *exposes* `contentOffset`/`contentLength` for a
+  true suffix-splice (send only the changed tail), but whether the firmware
+  splices vs. re-wraps on a partial offset is **unverified** — an on-device probe
+  (see checklist). The old "flicker-free partial-update" comment was aspirational
+  and is now corrected.
+- **Smoothness on the lens is fundamentally limited by the ~3/sec BLE ceiling +
+  fixed font + no animation API.** True slide-in (Japanese-TV look) is *only*
+  possible in the browser sim. On-glasses "smooth" = a clean *stepped* reveal
+  (the reveal pacer crawls ~2 words/tick) + phrase-boundary roll. Don't promise
+  silky motion on the lens; tune to the stepped reality (`__cadence(true)` in the
+  sim shows what the lens will actually do).
+- **Reveal pacing is interim-only and never delays finals.** A `final` clears the
+  engine's interim, so finalized text always shows in full immediately. The
+  pacer (`reveal-pacer.ts`) only governs the still-being-recognized tail.
+- **The sim's rAF loop is self-quiescing on purpose** (Tim's "least phone
+  compute" call): it runs only while a fade/glide is mid-flight, drops to a
+  ~400ms blink timer when only an interim cursor remains, and to *nothing* when
+  fully settled. Don't reintroduce an always-on rAF.
 
 ## Dev / test loop
 
@@ -114,12 +140,40 @@ WebView); re-scan the QR to force a full reload after code changes.
 ## Status (end of last session)
 
 - ✅ Runs on real G2; full-canvas captions; low-latency text streaming.
-- ✅ 209 tests, typecheck + build clean. Branch: `feat/caption-ux-engine`
-  (PR #1 open).
-- ⏳ **Next:** smooth/fluid caption motion + lower latency + live correction
-  (see `TODO.md` → "NEXT SESSION").
+- ✅ **Caption-UX smoothness pass shipped in code** (throttle-beat fix, server
+  time-flush, trim hysteresis, word-paced reveal, sim fade+glide, `?lat`).
+- ✅ **229 tests** (was 209), typecheck + build + pack clean. Branch:
+  `feat/caption-ux-engine` (PR #1 open).
+- ⏳ **Next:** feel-test the smoothness on the lens (checklist below); then the
+  two DEFERRED items if wanted — live sentence self-correction ("revisable
+  tier") and per-speaker horizontal tracks (gated on diarization robustness).
 - ⚠️ Known bug to repro: speaker name-swapping (seen once; not deterministically
   reproduced). Deprioritized vs. UX but it's the most damaging correctness issue.
+
+## On-device checklist for the smoothness pass (Tim — the lens-only checks)
+
+The assistant verified all of this in code (unit tests + a headless sim driver
+that proved the rAF loop self-quiesces and settled text never re-fades). These
+are the lens-only feel checks it can't see:
+
+1. **No clumping / no mid-sentence jump.** Speak a long sentence. Words should
+   crawl in (a couple per ~300ms tick), not arrive in a 5-word flash. Lines
+   should roll up only at a phrase boundary, not mid-word.
+2. **Finals are never delayed.** When you stop speaking, the finalized sentence
+   should appear complete instantly (the pacer only crawls the *live* tail).
+3. **Long monologue keeps its live tail on-screen** (the trim safety valve) —
+   the newest words never scroll off while you're still talking.
+4. **Latency:** add `?lat` to the sideload URL (or run `__lat()` in the WebView
+   console) → logs rolling server→render ms every 3s. For the full mic→photons
+   number, do a 240fps clap/flash test (the bridge→lens leg is unmeasurable in
+   software).
+5. **Sim A/B (on the phone preview, not the lens):** `__cadence(true)` steps the
+   sim to the real ~3fps glasses cadence so you can compare it against the silky
+   default — this tells you what the lens *actually* does vs. the ideal.
+6. **Partial-update probe (optional, gates a future BLE optimization):** does the
+   firmware splice or re-wrap on `textContainerUpgrade` with `contentOffset>0`?
+   And does it honor leading blank lines for a bottom-anchor reserve? Both stay
+   OFF until answered on the lens.
 
 ## Watch-outs / how Tim works
 

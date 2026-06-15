@@ -83,6 +83,43 @@ describe('DisplayThrottle', () => {
     expect(flush).toHaveBeenLastCalledWith('3');
   });
 
+  it('does not keep a self-perpetuating beat once pending is drained', () => {
+    // Regression: the throttle used to re-arm a fresh 300ms timer after EVERY
+    // trailing flush, so it kept firing on a fixed grid misaligned with word
+    // arrivals — which made captions clump. After the pending value drains,
+    // no further timer should be scheduled until the next push().
+    const flush = vi.fn();
+    const t = new DisplayThrottle(flush, 300, now);
+
+    t.push('a'); // leading, fires now
+    t.push('b'); // pending
+    clock = 300;
+    vi.advanceTimersByTime(300); // 'b' flushes; pending now empty
+    expect(flush).toHaveBeenCalledTimes(2);
+
+    // No more pushes — there must be NO scheduled work left to fire.
+    clock = 5000;
+    vi.advanceTimersByTime(5000);
+    expect(flush).toHaveBeenCalledTimes(2); // still just a + b
+    // And vitest would flag a leaked timer if one were still armed.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a value arriving late in the window is not delayed by an extra interval', () => {
+    // With per-interval (not per-now) scheduling, a value pushed 250ms into a
+    // window flushes at the 300ms boundary (~50ms later), not 300ms later.
+    const flush = vi.fn();
+    const t = new DisplayThrottle(flush, 300, now);
+
+    t.push('a'); // leading at t=0
+    clock = 250;
+    t.push('b'); // 250ms into the window — should flush at t=300, not t=550
+    clock = 300;
+    vi.advanceTimersByTime(50); // advance to the 300ms boundary
+    expect(flush).toHaveBeenLastCalledWith('b');
+    expect(flush).toHaveBeenCalledTimes(2);
+  });
+
   it('flushNow forces the pending value out', () => {
     const flush = vi.fn();
     const t = new DisplayThrottle(flush, 300, now);
