@@ -151,14 +151,6 @@ export class CaptionEngine {
   // Cap how much history we retain internally (the viewport shows far less).
   private static readonly MAX_SEGMENTS = 40;
 
-  // Trim hysteresis for the glasses turn window: we only START dropping the
-  // oldest turn once the estimated line count exceeds the budget by this much,
-  // then drop back to the budget. Without it, a turn whose interim grows by one
-  // word can repeatedly cross the threshold and evict/restore a turn every few
-  // hundred ms — the "lines suddenly jump up" thrash. The gap means the window
-  // holds steady through normal growth and only rolls at a real overflow.
-  private static readonly TRIM_HYSTERESIS_LINES = 2;
-
   constructor(config: Partial<CaptionEngineConfig> = {}) {
     this.config = { ...DEFAULT_CAPTION_CONFIG, ...config };
   }
@@ -219,7 +211,7 @@ export class CaptionEngine {
    */
   updateInterim(speaker: number, text: string): void {
     const words = tokenize(text);
-    let { seg } = this.segmentFor(speaker, words);
+    const { seg, isRelabel } = this.segmentFor(speaker, words);
 
     // A streaming ASR interim repeats its OWN utterance from the start, so when
     // the active turn already has locked finals we normally drop the leading
@@ -232,10 +224,26 @@ export class CaptionEngine {
     // first locked word, and start a fresh turn for the speaker instead. (A mere
     // tail revision within the same utterance still shares the leading word, so
     // this never fires spuriously on normal continuation.)
-    if (seg.finalWords.length > 0 && words.length > 0 && words[0] !== seg.finalWords[0]) {
-      seg = { seq: this.nextSeq++, speaker, finalWords: [], interimWords: [] };
-      this.segments.push(seg);
+    //
+    // EXCEPT when this interim is a RE-DIARIZATION of the active turn (the
+    // diarizer flipped the speaker index mid-utterance — `isRelabel`). Then
+    // `segmentFor` has already relabelled the existing segment in place; these
+    // are the SAME words under a new index, so we must NOT open a fresh turn or
+    // the line breaks mid-sentence (the exact "new line when my name was
+    // assigned" bug). We fall through and re-stabilize the tail in place.
+    if (
+      !isRelabel &&
+      seg.finalWords.length > 0 &&
+      words.length > 0 &&
+      words[0] !== seg.finalWords[0]
+    ) {
+      const fresh: Segment = { seq: this.nextSeq++, speaker, finalWords: [], interimWords: [] };
+      this.segments.push(fresh);
       this.trim();
+      this.currentSpeaker = fresh.speaker;
+      // The new utterance's whole interim is its tail (nothing locked yet).
+      if (!sameWords(fresh.interimWords, words)) fresh.interimWords = words;
+      return;
     }
     this.currentSpeaker = seg.speaker;
 
@@ -330,13 +338,21 @@ export class CaptionEngine {
 
   /**
    * Build the rolling window as UNWRAPPED turns — one entry per speaker turn,
-   * words joined into a single string. For the real G2 text container, which
-   * word-wraps at the panel edge itself: we must NOT pre-wrap (that forces
-   * early line breaks and leaves the right side empty). We bound the window by
-   * an approximate visual-line budget so the firmware shows the most recent
-   * content without overflowing.
+   * words joined into a single string.
+   *
+   * We deliberately do NOT model the panel's geometry here. The G2 text
+   * container is the sole authority on its own layout: it word-wraps at the
+   * real panel edge (proportional firmware font — a guessed chars-per-line is
+   * meaningless) and, on overflow, scrolls/clips itself. So we emit every
+   * retained turn full-width and let the firmware wrap, scroll and clip. The
+   * only bound that physically exists is the SDK's content ceiling, enforced
+   * downstream in `render()` (which trims from the TOP, favouring the newest
+   * text the reader is actively following). There is no line budget and no
+   * char-per-line estimate — those were the source of the "wraps too early /
+   * only ~5 lines / right side empty" bugs, because the estimate (38 cpl) ran
+   * at roughly half the panel's true width and over-counted every turn.
    */
-  buildTurns(approxCharsPerLine: number, maxVisualLines: number): CaptionTurn[] {
+  buildTurns(): CaptionTurn[] {
     const turns: CaptionTurn[] = [];
     for (const seg of this.segments) {
       const finals = seg.finalWords.join(' ');
@@ -349,31 +365,6 @@ export class CaptionEngine {
         finalText: finals,
         interimText: interims,
       });
-    }
-
-    // Trim oldest turns to fit the panel — but smoothly. Two guards keep the
-    // window from "jumping":
-    //  • Hysteresis: don't start dropping until we're over budget by
-    //    TRIM_HYSTERESIS_LINES, so steady word-by-word growth doesn't thrash
-    //    the window. Once triggered, drop down to the budget.
-    //  • Never evict the live tail: we stop before removing the last turn (the
-    //    active one). A long monologue keeps its newest content on-screen; the
-    //    flat-string MAX_CHARS net in the renderer trims from the top within
-    //    that turn if it alone overflows, so the interim tail is never lost.
-    const estLines = (t: CaptionTurn): number => {
-      const tagLen = t.tag ? t.tag.length + 3 : 0;
-      const chars = tagLen + t.finalText.length + (t.interimText ? t.interimText.length + 1 : 0);
-      return Math.max(1, Math.ceil(chars / Math.max(8, approxCharsPerLine)));
-    };
-    let total = turns.reduce((n, t) => n + estLines(t), 0);
-    const dropThreshold = maxVisualLines + CaptionEngine.TRIM_HYSTERESIS_LINES;
-    if (total > dropThreshold) {
-      // Over the hysteresis band — roll the window down to the budget, but only
-      // by evicting fully-superseded older turns (never the last/active one).
-      while (turns.length > 1 && total > maxVisualLines) {
-        total -= estLines(turns[0]);
-        turns.shift();
-      }
     }
     return turns;
   }

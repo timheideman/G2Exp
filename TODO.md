@@ -47,9 +47,18 @@ Tim's original brief, verbatim (now addressed):
 - [ ] **Verify + enable the ONNX neural embedder** on the VPS — download the
       WeSpeaker model, set `EMBEDDER=onnx`, and run the offline torchaudio fbank
       cross-check (see `docs/SPEAKER_ID.md`) before trusting it in production.
-- [ ] Display-size calibration is wired (📐 Calibrate button in Settings +
-      `__cal()`/`__fit(l,c)` console helpers) — confirm the chosen lines/chars
-      feel right on Tim's unit and bake the value in as the default.
+- [ ] Calibration (📐 Calibrate + `__cal()`/`__fit(l,c)`) is now informational
+      only for the glasses — the glasses path models no wrap geometry (firmware
+      wraps), so chars/line no longer affects on-glasses output (still drives the
+      browser sim). Ruler widened to 90 cols. RESOLVED on-device: the firmware
+      does NOT auto-scroll — it parks the viewport — so we send a rolling
+      ~one-panel live window (`LIVE_WINDOW_CHARS`) anchored at the tail instead.
+      OPTIONAL: read the true chars/line + lines/screen off the ruler and tune
+      `LIVE_WINDOW_CHARS` if ~460 over/under-fills the panel on Tim's unit.
+- [ ] Scrollback + tap-to-live (deferred): keep a history buffer the wearer can
+      page back through, with a gesture to snap back to live-follow. Needs a free
+      gesture (double-tap is play/pause today) + a follow/paused mode. Auto-follow
+      (current behavior) is the baseline; this is the richer follow-up Tim wants.
 - [ ] User-adjustable line count + reveal style (DHH preference is split).
 
 ## 🟢 Nice to Have

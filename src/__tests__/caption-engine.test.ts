@@ -162,15 +162,19 @@ describe('CaptionEngine', () => {
     });
   });
 
-  describe('buildTurns (unwrapped glasses window + smooth trim)', () => {
-    // 38 chars/line is the real glasses geometry; 7 visual lines the budget.
-    const CPL = 38;
-    const BUDGET = 7;
+  describe('buildTurns (unwrapped, geometry-free glasses window)', () => {
+    // The glasses path no longer models panel geometry: buildTurns takes NO
+    // size args and applies NO line/char budget. It emits every retained turn
+    // full-width and the firmware wraps + scrolls + clips. (The only history
+    // bound is the engine's internal MAX_SEGMENTS; the only payload bound is
+    // the MAX_CHARS ceiling enforced in transcript-display.render(), tested
+    // there.) These were the "wraps too early / only ~5 lines" bugs: a guessed
+    // 38 chars/line ran at ~half the true width and over-counted every turn.
 
     it('returns one entry per speaker turn, full-width (no pre-wrap)', () => {
       engine.addFinal(0, 'hello there how are you doing today');
       engine.addFinal(1, 'i am doing very well thanks for asking');
-      const turns = engine.buildTurns(CPL, BUDGET);
+      const turns = engine.buildTurns();
       expect(turns).toHaveLength(2);
       // Whole turn on one logical line — the firmware wraps it, not us.
       expect(turns[0].finalText).toBe('hello there how are you doing today');
@@ -178,51 +182,48 @@ describe('CaptionEngine', () => {
       expect(turns[1].tag).toBe('B');
     });
 
-    it('keeps the live interim tail visible when far more turns exist than fit', () => {
-      // Many short turns from alternating speakers — more than the panel holds —
-      // then the newest speaker is mid-utterance with a live interim tail.
+    it('does NOT trim by any line/char budget — every retained turn is emitted', () => {
+      // Far more turns than any panel could show, each long enough that the old
+      // 7-line budget would have evicted most of them. With the budget gone,
+      // they ALL come back (bounded only by MAX_SEGMENTS=40, not hit here).
+      for (let i = 0; i < 20; i++) {
+        engine.addFinal(i, `turn number ${i} with a fair amount of padding words here`);
+      }
+      const turns = engine.buildTurns();
+      expect(turns).toHaveLength(20);
+      // Both the oldest and newest survive — no rolling window at this layer.
+      expect(turns[0].finalText).toContain('turn number 0');
+      expect(turns[turns.length - 1].finalText).toContain('turn number 19');
+    });
+
+    it('preserves chronological order, oldest first', () => {
+      for (let i = 0; i < 5; i++) engine.addFinal(i, `line ${i}`);
+      const turns = engine.buildTurns();
+      expect(turns.map((t) => t.finalText)).toEqual([
+        'line 0', 'line 1', 'line 2', 'line 3', 'line 4',
+      ]);
+    });
+
+    it('always includes the live interim tail as the last, current turn', () => {
       for (let i = 0; i < 12; i++) {
         engine.addFinal(i, `turn number ${i} with a fair amount of padding words here`);
       }
       // A fresh turn whose interim extends its own (empty) finals.
       engine.updateInterim(99, 'and this is the still being recognized live tail right now');
-      const turns = engine.buildTurns(CPL, BUDGET);
-      // The active turn (with the interim) is never evicted, even though older
-      // turns had to roll off to fit.
+      const turns = engine.buildTurns();
       const last = turns[turns.length - 1];
       expect(last.isCurrentSpeaker).toBe(true);
       expect(last.interimText).toContain('live tail right now');
-      // And the window did roll (oldest turns dropped).
-      expect(turns.some((t) => t.finalText.includes('turn number 0'))).toBe(false);
     });
 
-    it('applies hysteresis: does not drop a turn the instant it crosses budget', () => {
-      // Build a window sitting exactly at the budget across several short turns.
-      // Each ~one line. At BUDGET turns we're at the edge; one more should be
-      // absorbed by the hysteresis band rather than immediately evicting turn 0.
-      for (let i = 0; i < BUDGET; i++) {
-        engine.addFinal(i, `line ${i}`);
-      }
-      const atBudget = engine.buildTurns(CPL, BUDGET);
-      expect(atBudget).toHaveLength(BUDGET);
-      // One more single-line turn: total = BUDGET+1 ≤ BUDGET+HYSTERESIS(2) ⇒ kept.
-      engine.addFinal(BUDGET, `line ${BUDGET}`);
-      const overByOne = engine.buildTurns(CPL, BUDGET);
-      expect(overByOne).toHaveLength(BUDGET + 1); // not yet trimmed
-      // The oldest turn is still present (no thrash).
-      expect(overByOne[0].finalText).toBe('line 0');
-    });
-
-    it('rolls the window down to budget once past the hysteresis band', () => {
-      // Push well past budget + hysteresis with single-line turns.
-      for (let i = 0; i < BUDGET + 6; i++) {
-        engine.addFinal(i, `line ${i}`);
-      }
-      const turns = engine.buildTurns(CPL, BUDGET);
-      // Trimmed back toward the budget (not the full history), newest kept.
-      expect(turns.length).toBeLessThanOrEqual(BUDGET + 1);
-      expect(turns[turns.length - 1].finalText).toBe(`line ${BUDGET + 5}`);
-      // Oldest content rolled off the top.
+    it('bounds history only by MAX_SEGMENTS (internal retention), not geometry', () => {
+      // Push well past the 40-segment retention cap; buildTurns reflects that
+      // cap (and nothing tighter), keeping the most recent segments.
+      for (let i = 0; i < 60; i++) engine.addFinal(i, `line ${i}`);
+      const turns = engine.buildTurns();
+      expect(turns).toHaveLength(40);
+      // Newest kept; oldest (pre-cap) dropped by retention, not a line budget.
+      expect(turns[turns.length - 1].finalText).toBe('line 59');
       expect(turns.some((t) => t.finalText === 'line 0')).toBe(false);
     });
   });
@@ -283,6 +284,21 @@ describe('CaptionEngine', () => {
       expect(f.lines[0].speaker).toBe(0);
       const words = f.lines.flatMap((l) => l.tokens.map((t) => t.text));
       expect(words).toEqual(['great', 'weather', 'today', 'everyone']);
+    });
+
+    it('relabels an interim flip when the turn already has locked finals', () => {
+      // Realistic glasses ordering: a fragment finalizes under index 0, then the
+      // SAME utterance's interim continues but the diarizer flips it to index 1.
+      // Must relabel in place and append only the new tail — no new line, no
+      // dropped/duplicated words. (Pre-fix, updateInterim ignored isRelabel and
+      // could spawn a fresh turn → the mid-sentence break.)
+      engine.addFinal(0, 'my name is');                     // locked under [A]
+      engine.updateInterim(1, 'my name is Tim');            // flipped to [B], extended
+      const f = engine.buildFrame();
+      expect(f.lines.filter((l) => l.tag !== null)).toHaveLength(1);
+      expect(f.lines[0].speaker).toBe(1);
+      const words = f.lines.flatMap((l) => l.tokens.map((t) => t.text));
+      expect(words).toEqual(['my', 'name', 'is', 'Tim']); // once, in order
     });
 
     it('still opens a NEW turn when a different speaker says different words', () => {

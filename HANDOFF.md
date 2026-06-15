@@ -76,8 +76,31 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
 - **Fixed firmware font. No size/weight/family control.** Container size doesn't
   zoom it. "Bigger text" is impossible; "use the screen" = fill the full-width
   text container with the fixed font.
-- **The text container word-wraps itself.** Do NOT pre-wrap — emit full-width
-  lines and let the firmware wrap. (Pre-wrapping left the right side empty.)
+- **The text container word-wraps itself, but does NOT auto-scroll.** Two
+  separate facts, both measured on-device:
+  - *Wrapping:* the firmware wraps to the real panel width with a proportional
+    font — so a chars-per-line guess is meaningless. Do NOT pre-wrap and do NOT
+    model line geometry. `buildTurns()` takes no size args and applies no
+    line/char budget. (Pre-wrapping left the right side empty; the later 38-cpl
+    *estimate* ran at ~half the true width and over-counted lines → "wraps too
+    early / only ~5 visible lines". Both gone.)
+  - *Scrolling:* when content exceeds the panel the firmware APPENDS at the
+    bottom and PARKS the viewport (a scrollbar appears) — it does NOT follow the
+    newest text. It renders from the TOP of what we send. So to keep captions
+    auto-following we send only a rolling **~one-panel live window anchored at
+    the tail** (`LIVE_WINDOW_CHARS` in `transcript-display.ts`), re-trimmed every
+    render so the live tail always lands on-screen and older text rolls off the
+    top. `MAX_CHARS` (1800) is the hard backstop under that. The window is
+    char-based and approximate by design (proportional font) — it's "about a
+    screen", not a wrap width; erring small just leaves bottom whitespace.
+- **Speaker turns merge by RESOLVED tag, not Deepgram index.** `render()` joins
+  consecutive turns that resolve to the same display name into one flowing
+  block (tag printed once, joined by spaces — the firmware wraps it as a
+  paragraph). Plus the engine relabels a turn IN PLACE when the diarizer flips
+  its index mid-utterance (`updateInterim`/`addFinal` honor `isRelabel`).
+  Together these fix the "new line broke my sentence the instant my name was
+  assigned" bug: an index flip / rename no longer starts a new line. A genuinely
+  different speaker (different resolved tag) still breaks to a new line.
 - **Bitmaps exist but are useless for live captions** — capped at 288×144, no
   partial update, ~1.6–3s to transfer. Text container is the only path.
 - **BLE display update ceiling ~3/sec.** `app.ts` throttles to 300ms

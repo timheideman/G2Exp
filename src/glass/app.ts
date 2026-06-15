@@ -27,12 +27,13 @@ import type { CaptureState } from './caption-engine';
 const GLASSES_UPDATE_INTERVAL_MS = 300;
 
 /**
- * Caption layout for the real G2 text container. The firmware font is fixed
- * (no size control), so "use the screen" means filling the 576×288 panel with
- * the fixed font — a full-screen container holds ~400–500 chars ≈ ~12 lines ×
- * ~35–40 chars. We target a generous, panel-filling block. These are tunable
- * live via the on-glasses calibration screen (?cal grid) if the real unit
- * differs from these estimates.
+ * Caption layout config. NOTE: on the real glasses these numbers no longer
+ * drive anything — the firmware text container wraps to the real panel width
+ * and scrolls/clips itself, so we send full-width turns and let it lay them
+ * out (modeling a chars-per-line was the cause of the "wraps too early / only
+ * ~5 lines" bugs). The config is kept only because the browser SIMULATOR's
+ * pixel-wrapped `buildFrame` still uses maxLines/maxLineChars, and to keep the
+ * `__cal`/`__fit` calibration tooling functional. Glasses path = geometry-free.
  */
 const GLASSES_CAPTION_CONFIG = { maxLines: 7, maxLineChars: 38 };
 
@@ -275,9 +276,14 @@ export class LiveCaptionApp {
    * lines-per-screen; whichever ruler column falls off the right edge = chars.
    */
   showCalibrationGrid(seconds = 25): void {
-    const ruler = '....5....10...15...20...25...30...35...40...45...50';
+    // Ruler runs to 90 cols (the panel reads well past 50 — observed on-device
+    // with black space + a scrollbar still to the right), so the true
+    // chars-per-line edge is actually readable. The leading 2-digit number is
+    // the line index; the last fully-visible one = lines-per-screen.
+    const ruler =
+      '....5....10...15...20...25...30...35...40...45...50...55...60...65...70...75...80...85...90';
     const lines: string[] = [];
-    for (let i = 1; i <= 14; i++) {
+    for (let i = 1; i <= 16; i++) {
       const n = String(i).padStart(2, '0');
       lines.push(`${n}${ruler}`);
     }

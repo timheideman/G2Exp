@@ -65,6 +65,49 @@ describe('TranscriptDisplay', () => {
     });
   });
 
+  // The reported bug: while a speaker was "unidentified" the text flowed
+  // cleanly, but the instant the diarizer corrected the index (and a voiceprint
+  // resolved a name) MID-sentence, a new line broke the utterance in two. The
+  // fix relabels the turn in place (engine) AND merges consecutive same-NAME
+  // turns into one flowing block keyed on the resolved tag, not the raw index.
+  describe('mid-utterance relabel does not break the line', () => {
+    it('keeps one continuous line when the index flips mid-utterance', () => {
+      // Streaming under index 0, then the diarizer re-attributes the SAME words
+      // to index 1 and extends them — exactly Deepgram's unstable-index behavior.
+      display.updateInterim(0, 'my name is');
+      display.updateInterim(1, 'my name is Tim and');
+      const output = display.render();
+      // Body lines only (drop any status banner): exactly one caption line.
+      const bodyLines = output.split('\n').filter((l) => l.trim() && !l.includes('listening'));
+      expect(bodyLines).toHaveLength(1);
+      expect(output).toContain('my name is Tim and');
+      // The words are NOT duplicated across a broken line.
+      expect(output.match(/my name is/g)?.length).toBe(1);
+    });
+
+    it('merges consecutive turns that resolve to the same NAME under one tag', () => {
+      // Two different Deepgram indices that a voiceprint resolves to one person.
+      display.setNameResolver((idx) => (idx === 0 || idx === 1 ? 'Tim' : ''));
+      display.addFinal(0, 'First sentence.');
+      display.addFinal(1, 'Second sentence.'); // different index, same resolved name
+      const output = display.render();
+      // One flowing block, one [Tim] tag — not two separately-tagged lines.
+      expect(output.match(/\[Tim\]/g)?.length).toBe(1);
+      expect(output).toContain('First sentence.');
+      expect(output).toContain('Second sentence.');
+    });
+
+    it('still breaks the line for a genuinely different speaker', () => {
+      display.addFinal(0, 'Hello there');
+      display.addFinal(1, 'Hi back'); // different speaker, different tag → new line
+      const output = display.render();
+      const bodyLines = output.split('\n').filter((l) => l.trim() && !l.includes('listening'));
+      expect(bodyLines).toHaveLength(2);
+      expect(output).toContain('[A] Hello there');
+      expect(output).toContain('[B] Hi back');
+    });
+  });
+
   describe('frame model', () => {
     it('exposes a structured frame with current-speaker emphasis', () => {
       display.addFinal(0, 'first');
@@ -148,30 +191,43 @@ describe('TranscriptDisplay', () => {
     });
   });
 
-  describe('rolling window', () => {
-    it('limits the visible window to maxLines', () => {
-      const small = new TranscriptDisplay({ maxLines: 3, maxLineChars: 30 });
-      small.setStatus('listening'); // no status banner in the happy path
+  describe('rolling window (geometry-free: firmware clips, we cap by MAX_CHARS)', () => {
+    // The flat string is NO LONGER trimmed to a guessed line count — the
+    // firmware wraps and clips to the real panel. We emit every retained turn;
+    // the only payload bound is the MAX_CHARS (1800) container ceiling, which
+    // trims from the TOP so the newest text the reader is following survives.
+
+    it('follows the live tail: newest always present, oldest rolls off the top', () => {
+      const d = new TranscriptDisplay();
+      d.setStatus('listening'); // no status banner in the happy path
       for (let i = 0; i < 30; i++) {
-        small.addFinal(i % 3, `This is sentence number ${i + 1} from the conversation.`);
+        d.addFinal(i % 3, `This is sentence number ${i + 1} from the conversation.`);
       }
-      const output = small.render();
+      const output = d.render();
       const lines = output.split('\n').filter(Boolean);
-      expect(lines.length).toBeLessThanOrEqual(3);
-      // Most recent text should still be visible
-      expect(output).toContain('30');
+      // No guessed line budget — the live window is char-based (~one panel) and
+      // holds several turns, more than the old 3-line cap…
+      expect(lines.length).toBeGreaterThan(3);
+      // …the newest is always shown (auto-follow)…
+      expect(output).toContain('number 30 ');
+      // …and the oldest has rolled off the top so the tail stays on-screen.
+      expect(output).not.toContain('number 1 ');
     });
 
-    it('keeps most recent content when trimming', () => {
-      const small = new TranscriptDisplay({ maxLines: 3, maxLineChars: 30 });
-      small.setStatus('listening');
-      small.addFinal(0, 'Old message from the very start');
-      for (let i = 0; i < 25; i++) {
-        small.addFinal(i % 2, `Message ${i + 1} with extra padding text`);
+    it('keeps the most recent content when the MAX_CHARS ceiling forces a trim', () => {
+      const d = new TranscriptDisplay();
+      d.setStatus('listening');
+      d.addFinal(0, 'Old message from the very start');
+      // Enough long turns to blow past the 1800-char container ceiling, forcing
+      // the top-trim safety net to drop the oldest line(s).
+      for (let i = 0; i < 80; i++) {
+        d.addFinal(i % 2, `Message ${i + 1} with a generous amount of extra padding text to consume characters quickly`);
       }
-      const output = small.render();
+      const output = d.render();
+      expect(output.length).toBeLessThanOrEqual(1800);
+      // Oldest rolled off the top; the newest turn is still there.
       expect(output).not.toContain('Old message from the very start');
-      expect(output).toContain('25');
+      expect(output).toContain('Message 80 ');
     });
   });
 
@@ -336,25 +392,29 @@ describe('TranscriptDisplay', () => {
       d.setStatus('listening');
       const loop = makeLoop(d, () => clock);
 
-      // The active (still-being-spoken) turn is always the LAST rendered line.
-      // Assert against it directly rather than fuzzy-filtering across lines —
-      // a word like "phrase" legitimately appears in both sentences.
+      // Same-speaker turns merge into ONE flowing block (tag once), so phrase
+      // 1's finals and phrase 2's crawling interim share the active line. The
+      // interim tail = the visible words BEYOND phrase 1's finalized prefix.
+      const PHRASE1 = 'alpha bravo charlie delta echo foxtrot';
+      const PHRASE1_FINAL_COUNT = PHRASE1.split(' ').length; // 6
       const activeInterimWords = (push: string) => {
         const lastLine = push.trimEnd().split('\n').at(-1)!;
         // Active turn with a live tail ends in the interim cursor.
         if (!lastLine.includes('━')) return [];
-        return visibleWords(lastLine);
+        // Words after the finalized prefix are the still-crawling interim.
+        return visibleWords(lastLine).slice(PHRASE1_FINAL_COUNT);
       };
 
-      // ── Phrase 1: streams in fine ──
-      d.updateInterim(0, 'alpha bravo charlie delta echo foxtrot');
+      // ── Phrase 1: streams in fine ── (no finals yet, so all visible = interim)
+      d.updateInterim(0, PHRASE1);
       loop.updateDisplay();
       clock = 300; loop.advanceTo(300);
       clock = 600; loop.advanceTo(600);
-      expect(activeInterimWords(loop.pushes.at(-1)!).length).toBe(6); // all 6 shown
+      // Pre-finalize, the whole active line is interim; no prefix to skip yet.
+      expect(visibleWords(loop.pushes.at(-1)!).length).toBe(6); // all 6 shown
       // Phrase 1 finalizes (Deepgram is_final / utterance_end). Interim cleared.
       clock = 650;
-      d.addFinal(0, 'alpha bravo charlie delta echo foxtrot');
+      d.addFinal(0, PHRASE1);
       loop.updateDisplay();
 
       const pushesAfterPhrase1 = loop.pushes.length;
@@ -363,9 +423,10 @@ describe('TranscriptDisplay', () => {
       clock = 2000; // the wearer paused ~1.3s, then resumed
       d.updateInterim(0, 'golf hotel india juliet kilo lima mike november');
       loop.updateDisplay();
-      // The active turn shows only the LEADING interim words of phrase 2 — it
-      // crawls in, exactly like phrase 1 did. Pre-fix this either showed the
-      // whole phrase at once (no streaming) or nothing until the next pause.
+      // The active block's INTERIM tail shows only the LEADING words of phrase 2
+      // — it crawls in, exactly like phrase 1 did (just appended to the same
+      // speaker's block). Pre-fix this either showed the whole phrase at once or
+      // nothing until the next pause.
       const firstP2 = activeInterimWords(loop.pushes.at(-1)!);
       expect(firstP2).toEqual(['golf', 'hotel']);
 

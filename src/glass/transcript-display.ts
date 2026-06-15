@@ -24,6 +24,7 @@ import {
   CaptionEngine,
   type CaptionFrame,
   type CaptionEngineConfig,
+  type CaptionTurn,
   type CaptureState,
 } from './caption-engine';
 import { RevealPacer } from './reveal-pacer';
@@ -32,6 +33,20 @@ import { RevealPacer } from './reveal-pacer';
 //   576×288 px canvas, fixed firmware font, ~35–40 chars/line × up to ~12 lines.
 //   A full-screen text container holds ~400–500 chars (≤2000 via upgrade).
 const MAX_CHARS = 1800;         // Hard ceiling on the flat string (under the 2000 upgrade limit)
+
+// Soft live-follow window. ON-DEVICE FACT: the firmware text container does NOT
+// auto-scroll to the newest text — it appends at the bottom and parks the
+// viewport, so anything past the first screenful sits below the fold until the
+// wearer manually scrolls (useless for live captions). It DOES render from the
+// TOP of whatever content we send. So to keep captions auto-following, we send
+// only ~one panel of the most recent text, re-trimmed every render: the live
+// tail then always lands within the visible region and older text rolls off the
+// top. Sized a touch under the ~400–500-char visible capacity so the tail is
+// comfortably on-screen (erring small just leaves a little bottom whitespace —
+// safe; erring large parks the tail off-screen — the bug). Approximate by
+// design: the proportional firmware font makes an exact char count impossible,
+// and we don't need one — this is "about a screen", not a wrap width.
+const LIVE_WINDOW_CHARS = 460;
 const SPEAKER_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 export class TranscriptDisplay {
@@ -44,8 +59,6 @@ export class TranscriptDisplay {
   private paused = false;
   /** Live pipeline state for the always-visible status indicator. */
   private status: CaptureState = 'connecting';
-  /** Local mirror of the layout config (used to bound the glasses turn window). */
-  private config: { maxLines: number; maxLineChars: number };
   /**
    * Paces the interim tail on the GLASSES path so a burst of new words crawls
    * in (~2 per BLE tick) instead of flashing. Glasses-only — the sim shows full
@@ -55,17 +68,19 @@ export class TranscriptDisplay {
 
   constructor(config?: Partial<CaptionEngineConfig>, now: () => number = Date.now) {
     this.engine = new CaptionEngine(config);
-    this.config = { maxLines: config?.maxLines ?? 7, maxLineChars: config?.maxLineChars ?? 40 };
     this.revealPacer = new RevealPacer(2, 300, now);
     // The engine resolves tags through our name resolver / letter fallback.
     this.engine.setTagResolver((idx) => this.tagFor(idx));
   }
 
-  /** Adjust the visible line count / wrap width / pacing at runtime. */
+  /**
+   * Adjust layout/pacing at runtime. Only `maxLines`/`maxLineChars` for the
+   * browser SIMULATOR path survive here (they drive the engine's pixel-wrapped
+   * `buildFrame`); the glasses path no longer models geometry — the firmware
+   * wraps and scrolls itself — so these are inert for on-glasses rendering.
+   */
   setConfig(config: Partial<CaptionEngineConfig>): void {
     this.engine.setConfig(config);
-    if (config.maxLines !== undefined) this.config.maxLines = config.maxLines;
-    if (config.maxLineChars !== undefined) this.config.maxLineChars = config.maxLineChars;
   }
 
   /** Set an external name resolver for speaker display names */
@@ -164,11 +179,13 @@ export class TranscriptDisplay {
   render(opts: { paceReveal?: boolean } = {}): string {
     const effectiveStatus: CaptureState = this.paused ? 'paused' : this.status;
 
-    // Approx panel geometry only used to bound how many turns we keep — NOT to
-    // wrap. Generous so we don't drop content the firmware could still show.
-    const approxCharsPerLine = this.config.maxLineChars;
-    const maxVisualLines = this.config.maxLines;
-    const turns = this.engine.buildTurns(approxCharsPerLine, maxVisualLines);
+    // One full-width line per turn — no pre-wrap, no chars-per-line guess: the
+    // firmware wraps to the real panel width itself. But it does NOT auto-scroll
+    // to the newest text (it parks the viewport), so we bound WHAT we send to a
+    // rolling ~one-panel live window anchored at the tail (see LIVE_WINDOW_CHARS
+    // and the trim below) — that, not a line budget, is what keeps captions
+    // auto-following. MAX_CHARS remains the hard backstop.
+    const turns = this.engine.buildTurns();
 
     // Reveal-pacing (glasses only): crawl the active turn's interim tail in a
     // few words per BLE tick instead of flashing a whole burst. The active turn
@@ -191,28 +208,47 @@ export class TranscriptDisplay {
       return `${hint}\n\n  Speak and captions\n  will appear here.`;
     }
 
+    // Live-follow window: keep only the most recent turns that fit ~one panel,
+    // accumulating from the NEWEST backward so the live tail is always within
+    // the visible region (the firmware shows the top of what we send and won't
+    // auto-scroll). The active turn (last) is always kept even if it alone
+    // exceeds the budget — a long monologue keeps its newest words on-screen;
+    // the MAX_CHARS net below still trims within it from the top if needed.
+    const windowed = this.recentWithinBudget(turns, LIVE_WINDOW_CHARS);
+
     let output = '';
     const banner = statusBanner(effectiveStatus);
     if (banner) output += `${banner}\n`;
 
-    // Print the [Tag] only when the speaker CHANGES from the previous turn, so a
-    // run of consecutive same-speaker turns reads as one labelled block, not a
-    // tag stamped on every line. The engine deliberately splits a speaker's
-    // successive sentences into separate turns (so each new utterance gets its
-    // own fresh interim tail — the streaming fix), but visually they're the same
-    // person still talking, so the label should persist, not repeat. A system
-    // notice (speaker -1) or a genuine different speaker breaks the run and the
-    // next same-speaker turn re-prints its tag.
-    let lastSpeaker: number | null = null;
-    for (const turn of turns) {
-      const sameAsPrev = turn.speaker >= 0 && turn.speaker === lastSpeaker;
+    // Merge consecutive turns that resolve to the SAME display tag into one
+    // continuous block: the tag is printed once, and same-tag turns are joined
+    // on the same logical line (a space, not a newline) so the firmware wraps
+    // them as one flowing paragraph. This keys on the RESOLVED tag, not the raw
+    // Deepgram index — which fixes the mid-sentence line break when the diarizer
+    // flips a speaker's index (or a voiceprint renames it) part-way through:
+    // "[A] my name is" → "[Tim] my name is" stays one line, because both turns
+    // resolve to the same person. The engine deliberately splits a speaker's
+    // successive utterances into separate turns (fresh interim tail per
+    // utterance — the streaming fix), but visually they're one speaker still
+    // talking, so they read as one labelled block. A system notice (speaker -1)
+    // or a genuinely different tag breaks the run and re-prints the next tag.
+    let lastTag: string | null = null;
+    let started = false;
+    for (const turn of windowed) {
+      const tagKey = turn.speaker >= 0 ? turn.tag : null;
+      const sameAsPrev = started && tagKey !== null && tagKey === lastTag;
       const prefix = turn.tag !== null && turn.speaker >= 0 && !sameAsPrev ? `[${turn.tag}] ` : '';
       const text = turn.interimText
         ? `${turn.finalText}${turn.finalText ? ' ' : ''}${turn.interimText} ━`
         : turn.finalText;
-      output += `${prefix}${text}\n`;
-      lastSpeaker = turn.speaker;
+      // Same-tag continuation joins the previous block with a space; a new
+      // tag (or the first turn) starts on its own line.
+      const sep = started ? (sameAsPrev ? ' ' : '\n') : '';
+      output += `${sep}${prefix}${text}`;
+      lastTag = tagKey;
+      started = true;
     }
+    output += '\n';
 
     // Safety net: keep the flat string under the container ceiling.
     while (output.length > MAX_CHARS) {
@@ -222,6 +258,38 @@ export class TranscriptDisplay {
     }
 
     return output;
+  }
+
+  /**
+   * Keep the most recent turns whose combined rendered length fits `budget`
+   * characters, accumulating from the NEWEST backward. The last (active) turn
+   * is always included even if it alone exceeds the budget, so the live tail is
+   * never dropped. Returns the kept turns in chronological order (oldest first).
+   *
+   * This is the live-follow window: the firmware renders from the top of what
+   * we send and won't auto-scroll, so bounding the payload to ~one panel keeps
+   * the tail on-screen and rolls older text off the top. The per-turn estimate
+   * mirrors what `render()` emits (tag prefix + finals + interim); it's
+   * approximate (proportional font) and that's fine — this is "about a screen".
+   */
+  private recentWithinBudget(turns: CaptionTurn[], budget: number): CaptionTurn[] {
+    if (turns.length === 0) return turns;
+    const cost = (t: CaptionTurn): number => {
+      const tagLen = t.tag && t.speaker >= 0 ? t.tag.length + 3 : 0; // "[Tag] "
+      const interimLen = t.interimText ? t.interimText.length + 3 : 0; // " … ━"
+      return tagLen + t.finalText.length + interimLen + 1; // +1 line separator
+    };
+    let used = 0;
+    let start = turns.length - 1; // always keep the active turn
+    used += cost(turns[start]);
+    // Walk older turns until the next one would overflow the panel budget.
+    for (let i = turns.length - 2; i >= 0; i--) {
+      const c = cost(turns[i]);
+      if (used + c > budget) break;
+      used += c;
+      start = i;
+    }
+    return turns.slice(start);
   }
 
   /**
