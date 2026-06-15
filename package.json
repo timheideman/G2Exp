@@ -11,7 +11,8 @@
     "qr": "evenhub qr --http --port 5173",
     "pack": "npm run build && evenhub pack app.json dist -o livecaption.ehpk",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "setup:onnx": "bash scripts/setup-onnx-embedder.sh"
   },
   "dependencies": {
     "@deepgram/sdk": "^3.9.0",

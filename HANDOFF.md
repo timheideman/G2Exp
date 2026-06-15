@@ -130,9 +130,31 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
 - **`smart_format: true` on Deepgram streaming HOLDS text** until entity
   completion / ~3s silence — it made captions appear only at sentence end. It's
   now OFF; readability comes from `punctuate` + `numerals` (no delay).
+- **⚠️ THE fbank bug (fixed Jun 15) — root cause of ALL speaker-ID failure.**
+  `kaldi-fbank.ts` fed normalized `[-1,1]` audio to the WeSpeaker ECAPA model,
+  which (like Kaldi/torchaudio) was trained on **int16-magnitude** samples. Every
+  mel energy fell below `energy_floor=1.0`, so `log(max(e,1))=0` for all bins →
+  flat features → a **near-constant embedding for every voice** (different people
+  scored cosine **0.99**). The embedder could not tell anyone apart — naming AND
+  any acoustic approach were silently dead. Fix: `samples * 32768` before fbank
+  (matches WeSpeaker `infer_onnx.py`). Verified on real recordings: different-
+  speaker cosine **0.98 → 0.16**; clean separation at ≥1.5s windows. The ONNX
+  self-check (`same > diff + 0.02`) was too weak to catch this — it barely passed
+  on synthetic tones. **Anyone touching the embedder: re-run
+  `scripts/measure-voice-separation.mts` on real two-voice audio and demand a
+  clear same-vs-different gap, not just a passing self-check.**
 - **Deepgram streaming diarization indices are unstable** (a speaker can flip
   index). That's why the resolver re-derives names every segment instead of
   matching once. `endpointing` gates *finals* only, not interim text.
+- **Interruptions: measured Deepgram behavior** (via `scripts/diag-diarize.mts`).
+  Overlapping speech → both voices collapse onto ONE index, no split ever.
+  Back-to-back → it eventually splits but lags a sentence+ (new speaker's first
+  words land on the prior index). Two-layer response: (1) `addFinalRuns` splits a
+  final into per-speaker turns when Deepgram DID label the boundary at word level
+  (wired: server sends `runs`, client renders each as its own turn); (2)
+  `TurnSegmenter` (acoustic re-segmentation, built + calibrated, NOT yet wired)
+  is the fallback for when Deepgram lags/merges — wire it after the on-device
+  test confirms the fbank fix alone isn't enough.
 - **Streaming diarization is the WEAK, unimproved model.** Deepgram's next-gen
   diarizer (≈53% better) is **batch/pre-recorded only** — `diarize_model` does
   not exist on streaming; streaming has just `diarize` (on/off) + `diarize_version`.

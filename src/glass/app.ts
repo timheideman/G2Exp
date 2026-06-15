@@ -474,7 +474,16 @@ export class LiveCaptionApp {
   private handleTranscript(msg: any): void {
     switch (msg.type) {
       case 'final':
-        this.display.addFinal(msg.speaker, msg.text);
+        // When Deepgram split this final across speakers (an interruption it
+        // caught at the word level), render each contiguous same-speaker run as
+        // its own turn so the interrupter gets their own tagged line — instead
+        // of the collapsed primary speaker swallowing their words. Single-run
+        // finals fall through to the plain path.
+        if (Array.isArray(msg.runs) && msg.runs.length > 1) {
+          this.display.addFinalRuns(msg.runs);
+        } else {
+          this.display.addFinal(msg.speaker, msg.text);
+        }
         break;
       case 'interim':
         this.display.updateInterim(msg.speaker, msg.text);

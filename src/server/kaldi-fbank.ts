@@ -30,6 +30,18 @@ const PREEMPH = 0.97;
 const LOW_FREQ = 20;
 const HIGH_FREQ = SR / 2; // 8000
 const ENERGY_FLOOR = 1.0;
+/**
+ * Samples arrive normalized to [-1, 1] (int16 / 32768), but Kaldi /
+ * torchaudio.compliance.kaldi.fbank — and therefore the WeSpeaker model trained
+ * on it — operate on the raw INT16 sample range (~[-32768, 32767]). WeSpeaker's
+ * infer_onnx.py multiplies the loaded waveform by 1<<15 before fbank for exactly
+ * this reason. Without this, every mel energy lands below ENERGY_FLOOR=1.0, so
+ * log(max(e,1))=0 for every bin → flat, near-zero features → a near-CONSTANT
+ * embedding for every voice (cosine ≈0.99 between *different* speakers). That
+ * silent collapse is what made speaker-ID/diarization unable to tell voices
+ * apart. Scaling back to int16 magnitude restores real log-mel features.
+ */
+const SAMPLE_SCALE = 32768;
 
 // ─── FFT (radix-2, in place) ────────────────────────────────────
 
@@ -158,9 +170,10 @@ export function computeFbank(
   for (let t = 0; t < numFrames; t++) {
     const start = t * FRAME_SHIFT;
 
-    // Copy frame.
+    // Copy frame, scaling [-1,1] samples up to Kaldi's int16 magnitude (see
+    // SAMPLE_SCALE) so the mel energies land in the model's trained range.
     const frame = new Float64Array(FRAME_LEN);
-    for (let i = 0; i < FRAME_LEN; i++) frame[i] = samples[start + i];
+    for (let i = 0; i < FRAME_LEN; i++) frame[i] = samples[start + i] * SAMPLE_SCALE;
 
     // remove_dc_offset (per frame): subtract mean.
     let mean = 0;

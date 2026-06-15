@@ -7,3 +7,7 @@ dist/
 # Neural speaker-embedding models (downloaded on the server, not committed)
 models/
 *.onnx
+
+# Local scratch: test recordings, diagnostic captures (personal audio — never commit)
+tmp/
+*.diarize.log

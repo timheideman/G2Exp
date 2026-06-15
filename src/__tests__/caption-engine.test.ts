@@ -317,6 +317,67 @@ describe('CaptionEngine', () => {
     });
   });
 
+  /**
+   * Interruption split: when one transcript carries words from more than one
+   * speaker (Deepgram diarized the interruption at the word level), addFinalRuns
+   * breaks it into a turn per contiguous same-speaker run — so the interrupter's
+   * words land on their OWN tagged line instead of being appended to the
+   * interrupted speaker.
+   */
+  describe('addFinalRuns (word-level interruption split)', () => {
+    const textOf = (e: CaptionEngine) =>
+      e.buildFrame().lines.map((l) => `${l.tag ? `[${l.tag}] ` : ''}${l.tokens.map((t) => t.text).join(' ')}`);
+
+    it('splits a two-speaker final into two tagged turns', () => {
+      engine.addFinalRuns([
+        { speaker: 0, text: 'so what i think is' },
+        { speaker: 1, text: 'no that is wrong' },
+      ]);
+      expect(textOf(engine)).toEqual([
+        '[A] so what i think is',
+        '[B] no that is wrong',
+      ]);
+    });
+
+    it('attributes the latest run as the current speaker', () => {
+      engine.addFinalRuns([
+        { speaker: 0, text: 'I really think we should' },
+        { speaker: 1, text: 'wait stop' },
+      ]);
+      expect(engine.activeSpeaker).toBe(1);
+      const f = engine.buildFrame();
+      expect(f.lines.find((l) => l.speaker === 1)!.isCurrentSpeaker).toBe(true);
+    });
+
+    it('merges a run that continues the previous turn (same speaker across calls)', () => {
+      engine.addFinal(0, 'let me start');
+      engine.addFinalRuns([
+        { speaker: 0, text: 'and continue' },     // same speaker → same turn
+        { speaker: 1, text: 'actually no' },      // interrupter → new turn
+      ]);
+      expect(textOf(engine)).toEqual([
+        '[A] let me start and continue',
+        '[B] actually no',
+      ]);
+    });
+
+    it('a single-run set behaves like addFinal', () => {
+      engine.addFinalRuns([{ speaker: 0, text: 'just one speaker here' }]);
+      expect(textOf(engine)).toEqual(['[A] just one speaker here']);
+    });
+
+    it('three alternating runs produce three turns in order', () => {
+      engine.addFinalRuns([
+        { speaker: 0, text: 'first' },
+        { speaker: 1, text: 'second' },
+        { speaker: 0, text: 'third' },
+      ]);
+      // speaker 0 reappears as a NEW turn (it did not continue — speaker 1 spoke
+      // in between), so the tag repeats.
+      expect(textOf(engine)).toEqual(['[A] first', '[B] second', '[A] third']);
+    });
+  });
+
   describe('clear', () => {
     it('resets all state', () => {
       engine.addFinal(0, 'hello');

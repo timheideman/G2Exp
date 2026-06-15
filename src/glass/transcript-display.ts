@@ -145,6 +145,23 @@ export class TranscriptDisplay {
     }
   }
 
+  /**
+   * Add a finalized transcript that Deepgram split across speakers (an
+   * interruption caught at the word level). Each contiguous same-speaker run
+   * becomes its own turn, so the interrupter's words land on their own tagged
+   * line. Falls back to addFinal for a degenerate single/empty run set.
+   */
+  addFinalRuns(runs: Array<{ speaker: number; text: string }>): void {
+    const valid = runs.filter((r) => r && typeof r.text === 'string' && r.text.trim());
+    if (valid.length === 0) return;
+    if (valid.length === 1) {
+      this.addFinal(valid[0].speaker, valid[0].text);
+      return;
+    }
+    for (const r of valid) if (r.speaker >= 0) this.getLabel(r.speaker);
+    this.engine.addFinalRuns(valid);
+  }
+
   /** Update the current interim (not yet finalized) transcript */
   updateInterim(speaker: number, text: string): void {
     if (speaker >= 0) this.getLabel(speaker);

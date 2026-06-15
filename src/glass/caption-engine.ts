@@ -90,6 +90,17 @@ export interface CaptionTurn {
   interimText: string;
 }
 
+/**
+ * One contiguous same-speaker run of words from a single transcript — the
+ * word-level diarization Deepgram emits. A transcript with an interruption
+ * yields several runs (e.g. [{speaker:0,text:"so what i think"},
+ * {speaker:1,text:"no that's wrong"}]); a normal single-speaker one yields one.
+ */
+export interface SpeakerRun {
+  speaker: number;
+  text: string;
+}
+
 /** The complete, ready-to-render caption state. */
 export interface CaptionFrame {
   lines: CaptionLine[];
@@ -130,8 +141,10 @@ interface Segment {
   /** Words that are finalized and locked — never rewritten. */
   finalWords: string[];
   /**
-   * The still-growing interim tail for this segment (only the most recent
-   * segment can have one). Locked words are moved out of here into finalWords.
+   * The still-growing interim tail for this segment. Interim words live only in
+   * TRAILING segments, but an interruption can leave more than one trailing
+   * segment interim at once (e.g. A's tail + B's interjection both unsettled
+   * until they finalize). Locked words are moved out of here into finalWords.
    */
   interimWords: string[];
 }
@@ -181,7 +194,33 @@ export class CaptionEngine {
   addFinal(speaker: number, text: string): void {
     const words = tokenize(text);
     if (words.length === 0) return;
+    this.ingestFinalRun(speaker, words);
+    this.trim();
+  }
 
+  /**
+   * Finalize a sequence of speaker-tagged RUNS from one transcript — the
+   * word-level diarization Deepgram already provides. When a single utterance
+   * contains words from more than one speaker (an interruption: "…and then I —
+   * no wait, that's wrong"), each contiguous same-speaker run becomes its own
+   * turn, so the interrupter's words break onto their own tagged line instead
+   * of being appended to the interrupted speaker. A single-run final behaves
+   * exactly like addFinal(). Runs are applied in order; same-speaker adjacent
+   * runs merge naturally via segmentFor.
+   */
+  addFinalRuns(runs: SpeakerRun[]): void {
+    let ingested = false;
+    for (const run of runs) {
+      const words = tokenize(run.text);
+      if (words.length === 0) continue;
+      this.ingestFinalRun(run.speaker, words);
+      ingested = true;
+    }
+    if (ingested) this.trim();
+  }
+
+  /** Lock one run's words onto its segment (relabel-aware). No trim. */
+  private ingestFinalRun(speaker: number, words: string[]): void {
     const { seg, isRelabel } = this.segmentFor(speaker, words);
     this.currentSpeaker = seg.speaker;
 
@@ -198,8 +237,6 @@ export class CaptionEngine {
     } else {
       seg.finalWords.push(...words);
     }
-
-    this.trim();
   }
 
   /**
