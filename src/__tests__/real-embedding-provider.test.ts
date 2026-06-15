@@ -11,7 +11,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { RealEmbeddingProvider } from '../server/real-embedding-provider';
-import { cosineSimilarity } from '../server/speaker-matcher';
+import { cosine as cosineSimilarity } from '../server/enrolled-speaker-matcher';
 
 // ─── Helpers ──────────────────────────────────────────────────
 

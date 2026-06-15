@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { MockEmbeddingProvider } from '../server/mock-embedding-provider';
-import { cosineSimilarity } from '../server/speaker-matcher';
+import { cosine as cosineSimilarity } from '../server/enrolled-speaker-matcher';
 
 describe('MockEmbeddingProvider', () => {
   const provider = new MockEmbeddingProvider();

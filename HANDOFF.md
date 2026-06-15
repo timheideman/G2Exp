@@ -9,37 +9,71 @@ pipeline.
 ## Copy-paste prompt to start the next session
 
 > This is **G2Exp / LiveCaption** — a live-caption app for **Even Realities G2**
-> smart glasses, built for **deaf and hard-of-hearing** users: it transcribes
-> the speech of people around the wearer and shows subtitles on the glasses,
-> with **speaker identification** (putting known names to voices) for group
-> conversations.
+> smart glasses for **deaf/hard-of-hearing** users: it transcribes nearby speech
+> onto the glasses with **speaker identification** (names to voices) for group
+> conversations. I'm Tim; I'm the on-glasses tester. `npm run dev` is how I run
+> it. **Read `HANDOFF.md` fully before doing anything** — especially the
+> "Hard-won facts" section; it has load-bearing detail. Tests + typecheck are
+> green (290 tests).
 >
-> Architecture: the app is an **Even Hub web app** (HTML/TS, in `src/glass/` +
-> `src/main.ts`) that runs in the **Even phone app's WebView**. The glasses are
-> just a mic + a 576×288 green monochrome display over BLE. The phone streams
-> glasses-mic PCM over a **WebSocket** to a **Node server** (`src/server/`) which
-> proxies to **Deepgram Nova-3** (streaming STT + diarization) and runs the
-> **speaker-ID pipeline** (VAD → voice embedding → identity resolver). Voiceprints
-> stay on-device (privacy-first). The server runs on a laptop in dev (or a VPS in
-> prod); the 25MB neural-embedder model, if enabled, lives on the server only.
+> Architecture: an **Even Hub web app** (`src/glass/` + `src/main.ts`) in the Even
+> phone WebView. Glasses = mic + 576×288 green monochrome BLE display. Phone
+> streams mic PCM over **WebSocket** to a **Node server** (`src/server/`) →
+> **Deepgram Nova-3** (streaming STT + diarization) + a **speaker-ID pipeline**
+> (VAD → ONNX ECAPA voice embedding → matching). Voiceprints stay on-device.
 >
-> It already **runs on real G2 hardware** via `evenhub qr` sideload, fills the
-> full display canvas, and captions appear quickly. The caption-UX smoothness
-> pass is **done in code** (smooth-feel fixes below); **229 tests pass;
-> typecheck and build are clean.** Read `HANDOFF.md` and `TODO.md` first.
+> **The job this session: fix speaker DIARIZATION** (transcription itself is
+> great). Long arc last session — here's exactly where we landed, proven with
+> real audio (don't re-derive, don't trust synthetic audio — it lies):
 >
-> **What just shipped (caption-UX smoothness, needs on-device feel-testing):**
-> killed the display-throttle's self-perpetuating 300ms beat (clumping), added a
-> 30ms server→Deepgram time-flush (sooner words), trim hysteresis so lines roll
-> at phrase boundaries instead of jumping mid-sentence, word-paced interim reveal
-> (~2 words/BLE-tick so the tail crawls instead of flashing — finals never
-> delayed), true smooth fade+glide in the **browser sim only** (self-quiescing
-> rAF = zero idle CPU), and `?lat` latency instrumentation. The on-glasses font
-> can't animate, so the lens gets a clean *stepped* reveal, not silky motion.
-> **Focus for THIS session:** feel-test those on the lens (checklist below),
-> then optionally pick up the two DEFERRED items — live sentence self-correction
-> (the "revisable tier") and per-speaker horizontal tracks. Verify in the sim AND
-> describe what to check on-device — I (Tim) am the on-glasses tester.
+> 1. **Root cause found + fixed (committed):** the ONNX embedder was silently
+>    broken — `kaldi-fbank.ts` fed `[-1,1]` audio to a model trained on int16
+>    scale, so every voice got a near-identical embedding (different people cosine
+>    0.99). Fixed with `samples * 32768`. Different-speaker cosine is now ~0.16.
+> 2. **Deepgram streaming diarization is fundamentally unreliable** for
+>    back-and-forth (measured: merges overlapping speakers onto one index, lags
+>    1-2 sentences on turn changes). Its better diarizer is batch-only. We can't
+>    fix it at the provider.
+> 3. **The decided strategy = enrolled-voiceprint matching, NOT blind
+>    diarization.** Measured: blind clustering needs ~3s windows and is marginal,
+>    but matching a chunk to a CLEAN ENROLLED voiceprint is **100% correct down to
+>    ~1s** (right match ~0.85 vs wrong ~0.25). So: enroll known people, then every
+>    ~1.5s of speech → nearest enrolled voice = the turn AND the name in one step.
+>    Unknowns cluster as "Speaker A/B" (best-effort; enrolled is the reliable one).
+> 4. **`EnrolledSpeakerMatcher`** (`src/server/enrolled-speaker-matcher.ts`) is now
+>    **WIRED into the server (Jun 16).** It is the single speaker mechanism — it
+>    replaced both `TurnSegmenter` and the `SpeakerIdentityResolver` for
+>    attribution. The dead `speaker-matcher.ts` (+ 2 of its tests) is deleted. tsc
+>    + 278 tests green.
+>
+> **DONE THIS SESSION:** wired the matcher into `index.ts` (embed each final's
+> dominant-speaker audio ~1.5s → `match()` → stable client int → emit
+> `speaker_identified`; `setEnrolled` on `load_voiceprints`). **Surprise finding:
+> the half-split homogeneity guard is UNUSABLE for the ONNX embedder at ~750ms
+> halves (measured — same- vs two-speaker half cosines fully overlap), so it was
+> removed from the match path** (it had dropped every real window). Live-server
+> replay of `tmp/AB_concat.wav` (`scripts/replay-ws-server.mts`): A half named
+> correctly, B half separates but the seam can briefly mislabel — that's the
+> on-device tuning target below.
+>
+> **DO THIS SESSION — on-device calibration** (the pipeline works; thresholds must
+> be tuned on real glasses-mic audio, NOT clips): re-enroll far-field on the
+> glasses mic; run a real back-and-forth; read the `🔀/🎤 [SpeakerMatch]` conf logs
+> and tune `MATCH_MIN_MS` + the matcher `acceptThreshold` to YOUR distributions.
+> Full step list in the "NEXT SESSION — on-device calibration" bullet of the
+> Hard-won facts.
+>
+> **Critical for when I test on-device after wiring:** I must **re-enroll my
+> voiceprints on the GLASSES mic in a realistic (far-field) setting** — the whole
+> approach rests on enrollment matching test conditions. Old enrollments are
+> useless (made by the broken embedder). Confirm `🧠 Embedding backend: ONNX
+> neural` + a passing self-check on server boot.
+>
+> Validation discipline that paid off last session: **prove changes on my real
+> audio (`tmp/*.mp3`, gitignored) BEFORE wiring; never tune thresholds on
+> synthetic TTS audio.** Ask me before big/irreversible steps. The diagnostic
+> scripts (`scripts/diag-diarize.mts`, `measure-voice-separation.mts`,
+> `replay-resegment.mts`) are there to reuse.
 
 ---
 
@@ -54,7 +88,8 @@ Even phone app  →  WebView runs our web app (src/glass/*, src/main.ts)
    ▼
 Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization)
    │
-   └─ speaker-ID: VAD → embedding (MFCC default / ONNX opt-in) → SpeakerIdentityResolver
+   └─ speaker-ID: per-final dominant-speaker audio → VAD → ONNX ECAPA embedding
+                  → EnrolledSpeakerMatcher (match to enrolled voice = turn + name)
 ```
 
 ## Key files
@@ -67,8 +102,9 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
 | `src/glass/reveal-pacer.ts` | **Word-paced interim reveal** for the glasses path: crawls ~2 new interim words per BLE tick so the tail doesn't flash. Interim-only; finals snap in full. Pure + clock-injectable, unit-tested. |
 | `src/glass/display-throttle.ts` | BLE-safe newest-wins coalescing (300ms). Now fires the trailing flush relative to the last real flush and does NOT self-re-arm a fresh beat (that beat was a clumping source). Leading edge kept (first word instant). |
 | `src/glass/display-simulator.ts` | Browser canvas renderer. Now does **true smooth motion** (per-token fade-in keyed by `CaptionToken.key`, eased scroll-baseline glide) via a **self-quiescing rAF loop** — animates only while something moves, idles to a slow blink timer, then to *nothing* (least phone compute). `setMatchGlassesCadence(on)` A/Bs silky-vs-real-3fps. Sim font is *scalable*; the real G2 font is *fixed* — don't trust the sim for absolute size OR for the lens's update smoothness. |
-| `src/server/index.ts` | WS proxy → Deepgram; per-turn audio extraction; feeds the speaker pipeline. Deepgram config + audio coalescing live here. |
-| `src/server/speaker-identity-resolver.ts` | Robust Deepgram-index → name mapping (online centroids + global assignment + hysteresis). |
+| `src/server/index.ts` | WS proxy → Deepgram; per-final dominant-speaker audio extraction; `attributeSpeaker()` runs the matcher and emits `speaker_identified`. Deepgram config + audio coalescing live here. |
+| `src/server/enrolled-speaker-matcher.ts` | **The speaker mechanism (wired Jun 16):** match a chunk to the nearest enrolled voiceprint (or a clustered unknown) → turn + name in one step. |
+| `src/server/speaker-identity-resolver.ts` | (Retired from the server Jun 16; module + tests kept.) Was the Deepgram-index → name mapping (online centroids + global assignment + hysteresis). |
 | `src/server/vad.ts`, `enrollment-quality.ts`, `real-embedding-provider.ts`, `onnx-embedding-provider.ts`, `kaldi-fbank.ts` | Speaker-ID building blocks. See `docs/SPEAKER_ID.md`. |
 
 ## Hard-won facts about the G2 (don't re-learn these)
@@ -149,28 +185,80 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
 - **Interruptions: measured Deepgram behavior** (via `scripts/diag-diarize.mts`).
   Overlapping speech → both voices collapse onto ONE index, no split ever.
   Back-to-back → it eventually splits but lags a sentence+ (new speaker's first
-  words land on the prior index). Two-layer response: (1) `addFinalRuns` splits a
-  final into per-speaker turns when Deepgram DID label the boundary at word level
-  (wired: server sends `runs`, client renders each as its own turn); (2)
-  `TurnSegmenter` (acoustic re-segmentation, built + calibrated, NOT yet wired)
-  is the fallback for when Deepgram lags/merges — wire it after the on-device
-  test confirms the fbank fix alone isn't enough.
+  words land on the prior index). `addFinalRuns` (wired) splits a final into
+  per-speaker turns when Deepgram DID label the boundary at word level — kept,
+  but it only helps the rare in-transcript-split case.
+- **⭐ THE STRATEGY (decided Jun 15, after measuring): enrolled-voiceprint
+  matching, NOT blind diarization.** Measured the fundamental limit on real
+  audio (`scripts/measure-voice-separation.mts`): blind clustering (comparing two
+  noisy short embeddings to each other) needs ~3s windows and is marginal. But
+  matching a short chunk to a CLEAN ENROLLED voiceprint is **100% correct down to
+  ~1s** (correct match cosine ~0.85 vs wrong ~0.25 — a landslide). So the plan is
+  to STOP doing blind online diarization and instead: enroll the known people
+  (you + regulars, **enroll far-field on the glasses mic** so it matches test
+  conditions), then every ~1.5s of speech → match to nearest enrolled voice =
+  the turn AND the name in one step. Unknown (unenrolled) voices cluster as
+  "Speaker A/B" (best-effort; the enrolled path is the reliable one).
+- **`EnrolledSpeakerMatcher`** (`src/server/enrolled-speaker-matcher.ts`): BUILT,
+  proven on real audio, unit-tested, and **WIRED into `index.ts` (Jun 16).** It is
+  now the single speaker mechanism — it replaced `TurnSegmenter` AND the
+  `SpeakerIdentityResolver` for attribution (matching to enrolled does
+  turn-detection + naming together). Defaults: acceptThreshold 0.45,
+  unknownMergeThreshold 0.40.
+- **✅ WIRING DONE (Jun 16).** `index.ts`: each FINAL's dominant-Deepgram-speaker
+  audio is accrued to ~1.5s (`MATCH_MIN_MS`, env-overridable), VAD-trimmed,
+  embedded, and `matcher.match(emb)` → `{speakerKey,name}`. `attributeSpeaker()`
+  maps the string `speakerKey` → a stable small int (`clientIdForKey`) used as the
+  client `speaker`/turn id; `emitNameIfChanged()` sends `speaker_identified
+  {speakerIndex:<int>, name}` only when a client id's name changes. Interims ride
+  the last attributed id (text flows; the next final corrects the tag).
+  `load_voiceprints` → `matcher.setEnrolled(...)`. Per-speaker rings still filled
+  (`fillSpeakerRings`) for `enroll_from_buffer`. The `resolver` /
+  `feedSpeakerAudio` / `emitIdentityChanges` / `resolveAcousticSpeaker` paths and
+  the dead `speaker-matcher.ts` (+ its `speaker-matcher.test.ts` /
+  `integration.test.ts`) are GONE. 278 tests + tsc green. `turn-segmenter.ts` and
+  `speaker-identity-resolver.ts` modules are kept (no longer used by the server,
+  but their tests pass and the diagnostic scripts depend on turn-segmenter).
+- **❌ THE HALF-SPLIT HOMOGENEITY GUARD WAS REMOVED from the match path (Jun 16) —
+  it is UNUSABLE for the ONNX ECAPA embedder at this window size, measured.**
+  `scripts/measure-homogeneity.mts`: same-speaker ~750ms half-window cosines
+  (0.03–0.49, med 0.21) **fully overlap** two-speaker A|B half cosines (−0.16–0.29,
+  med 0.08) → no threshold separates them. Wired with the guard at the default 0.5
+  it dropped EVERY real window as "MIXED" (nothing got attributed). At ~750ms the
+  embedding is phoneme- not speaker-dominated, so the guard's premise ("a speaker's
+  two halves agree") is false. `segment-homogeneity.ts` is kept (tests + possible
+  future longer-window use) but no longer called by `index.ts`. **Do NOT
+  reintroduce a half-split guard at sub-~1.5s windows for this embedder** — re-run
+  `measure-homogeneity.mts` first and demand a real gap. A genuine blend defense
+  needs a proper diarizer (pyannote) or our own voiceprint clustering.
+- **➡️ NEXT SESSION — on-device calibration of the matcher (Tim).** The pipeline
+  works; the remaining tuning MUST be done on real glasses-mic audio, not clips:
+  (1) **Re-enroll far-field on the glasses mic** — old enrollments are dead (broken
+  embedder) AND must match test conditions. Confirm `🧠 ONNX neural` + self-check
+  on boot. (2) **Watch the B-side seam.** On `AB_concat.wav` the live server names
+  the A half correctly (Alice, conf ~0.71) and cleanly separates B, but the first
+  ~1.5s of the *second* speaker can briefly mislabel (unknown / weak match
+  ~0.56), self-correcting on the next final. Two causes: a boundary-straddle window
+  (Deepgram lumps the new speaker's start onto the prior index — partially guarded
+  by the reset below) and short-window enrolled matches scoring lower than the
+  accept floor. (3) **Tune `MATCH_MIN_MS` and the matcher's `acceptThreshold` on
+  YOUR real back-and-forth** — read the `🔀/🎤 [SpeakerMatch]` conf logs and set the
+  accept floor between your real correct-match and wrong-match distributions. (4)
+  Validate with `scripts/replay-ws-server.mts [--enroll]` (drives the live server
+  over WS) and `scripts/replay-matcher.mts` (offline matcher logic).
+- **Accrual resets on a Deepgram index change between finals** (`resegDgIndex` in
+  `attributeSpeaker`, added Jun 16 — Tim's call): drops the partial match buffer so
+  a window won't glue two turns Deepgram itself split. Bounds cross-final straddle
+  blends; does NOT fix the case where Deepgram keeps the new speaker on the OLD
+  index for a beat (one window still spans two voices, mislabels ~1.5s, then
+  self-corrects). That residual is the on-device tuning target above.
 - **Streaming diarization is the WEAK, unimproved model.** Deepgram's next-gen
   diarizer (≈53% better) is **batch/pre-recorded only** — `diarize_model` does
   not exist on streaming; streaming has just `diarize` (on/off) + `diarize_version`.
-  Two failure modes: (a) a speaker flips index — handled in the caption engine by
-  relabel-in-place; (b) **two similar voices in one room collapse onto ONE index**
-  — Deepgram's word labels can't separate them, so the per-index audio is a blend.
-- **Mixed-segment guard** (`src/server/segment-homogeneity.ts`): before embedding
-  an index's accumulated audio, we split it, embed each half, and compare. If the
-  halves disagree (cosine < threshold) the segment spans two voices → we DROP it
-  rather than poison the voiceprint (the "speaker B is two people, then matched to
-  me" bug). The threshold is **embedder-dependent and needs on-device calibration**:
-  watch the `🚫 Dropped MIXED` / `📝 [FINAL] … ⚠️MULTI` server logs, read the
-  half-similarity values for real same-speaker vs. two-speaker segments, and set
-  `SEGMENT_MIN_HALF_SIM` (env) between those distributions. Default 0.5 is a guess.
-  This stops the *wrong name*; it does NOT make Deepgram separate the voices — that
-  needs a real diarizer (pyannote) or our own voiceprint-clustering diarizer.
+  We still send `diarize:true` — NOT for its naming (the matcher owns that) but
+  because its per-word index is the only signal we have to pick a final's DOMINANT
+  speaker's audio slices to embed. Its unreliability is exactly why we re-attribute
+  acoustically on top of it.
 - **Mic-AGC runs SERVER-SIDE, on the Deepgram branch only** (`index.ts` `sendAudio`
   + `MicAgc`). The ring buffer that feeds voice embeddings stays RAW — AGC
   normalizes loudness and would collapse the inter-speaker differences the

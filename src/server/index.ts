@@ -15,10 +15,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import type { ListenLiveClient } from '@deepgram/sdk';
 import { VoiceprintStore } from './voiceprint-store';
-import { SpeakerIdentityResolver } from './speaker-identity-resolver';
 import { detectVoiced } from './vad';
-import { assessSegmentHomogeneity, DEFAULT_HOMOGENEITY } from './segment-homogeneity';
-import { TurnSegmenter, type TurnSegmenterConfig } from './turn-segmenter';
+import { EnrolledSpeakerMatcher, type MatcherVoiceprint } from './enrolled-speaker-matcher';
 import { assessEnrollmentQuality } from './enrollment-quality';
 import { createEmbeddingProvider } from './embedding-provider-factory';
 import type { EmbeddingProvider } from '../types/speaker';
@@ -53,37 +51,27 @@ createEmbeddingProvider()
   .then((p) => { embeddingProvider = p; })
   .catch((err) => { console.error('Failed to init embedding provider:', err); });
 
-// ─── Speaker matching constants ─────────────────────────────────────────────
-// Identity is resolved by the SpeakerIdentityResolver (online centroids +
-// global assignment + hysteresis), not a single first-match-wins decision.
-// We embed a per-index segment once it has accumulated this much speech.
-const SEGMENT_MIN_MS = 1500;    // embed a segment after ~1.5s of that speaker's speech
+// ─── Speaker attribution (the SINGLE mechanism: enrolled-voiceprint matching) ─
+// THE STRATEGY (proven on real audio, see scripts/replay-matcher.mts): we do NOT
+// trust Deepgram's streaming diarization index (it lumps two voices onto one and
+// lags ~1-2 sentences) and we do NOT do blind online clustering. Instead, every
+// final's dominant-speaker audio is embedded and matched to the nearest ENROLLED
+// voiceprint by EnrolledSpeakerMatcher — which gives the TURN and the NAME in one
+// step (a change of matched identity between finals IS the turn boundary). On
+// tmp/AB_concat.wav this labels A then B correctly at the 1.5s window even where
+// Deepgram's own index is wrong. Unenrolled voices fall back to stable "Speaker
+// A/B" clusters. This replaces both TurnSegmenter and SpeakerIdentityResolver.
 
-// Mixed-segment rejection threshold (cosine between a segment's two halves,
-// below which we treat it as two voices and drop it). Embedder-dependent —
-// override without a redeploy via SEGMENT_MIN_HALF_SIM while calibrating against
-// the ?diag half-similarity logs. Falls back to the module default.
-const SEGMENT_MIN_HALF_SIM = process.env.SEGMENT_MIN_HALF_SIM
-  ? parseFloat(process.env.SEGMENT_MIN_HALF_SIM)
-  : DEFAULT_HOMOGENEITY.minHalfSimilarity;
-const homogeneityOpts = { minHalfSimilarity: SEGMENT_MIN_HALF_SIM };
+// (The half-split mixed-segment guard was removed from the match path: measured
+// on real audio it cannot separate same-speaker from two-speaker windows for the
+// ONNX embedder at this window size — see attributeSpeaker and
+// scripts/measure-homogeneity.mts. segment-homogeneity.ts is kept for its tests
+// and any future longer-window use.)
 
-// ─── Acoustic turn detection (override Deepgram's lagging/merged index) ───────
-// Deepgram streaming diarization is unreliable for back-and-forth speech
-// (measured: it lumps two voices on one index and lags ~1-2 sentences). When ON,
-// we decide the speaker label ACOUSTICALLY: embed each final's voiced audio and
-// ask TurnSegmenter whether the voice changed, then send THAT turn id to the
-// client instead of Deepgram's index. Validated offline (replay-resegment.mts)
-// to catch an A→B boundary ~2 windows before Deepgram. ON by default; disable
-// with RESEGMENT=off for an A/B. Thresholds tune via SEGMENTER_SWITCH/_STAY.
-const RESEGMENT_ENABLED = process.env.RESEGMENT !== 'off';
-const segmenterCfg: Partial<TurnSegmenterConfig> = {};
-if (process.env.SEGMENTER_SWITCH) segmenterCfg.switchThreshold = parseFloat(process.env.SEGMENTER_SWITCH);
-if (process.env.SEGMENTER_STAY) segmenterCfg.stayThreshold = parseFloat(process.env.SEGMENTER_STAY);
-// Minimum voiced audio before a final is acoustically judged. Below this the
-// embedding is too noisy to trust (measured: separation needs ~1.5s), so we
-// keep the current turn rather than risk a false split.
-const RESEGMENT_MIN_MS = process.env.RESEGMENT_MIN_MS ? parseInt(process.env.RESEGMENT_MIN_MS, 10) : 1200;
+// Minimum voiced audio accrued before a final is matched. Below this the
+// embedding is too noisy to attribute reliably (measured: clean separation needs
+// ~1.5s), so we keep the current speaker label rather than risk a false split.
+const MATCH_MIN_MS = process.env.MATCH_MIN_MS ? parseInt(process.env.MATCH_MIN_MS, 10) : 1500;
 
 // Coalesce mic frames to ~50ms before forwarding to Deepgram (16kHz·16-bit·mono
 // → 1600 bytes/50ms). Stays in DG's recommended 20–100ms buffer band.
@@ -121,13 +109,6 @@ interface LoadedVoiceprint {
   id: string;
   name: string;
   embedding: number[];
-}
-
-/** Accumulates audio for one Deepgram index until there's enough to embed. */
-interface SegmentAccumulator {
-  audioChunks: Uint8Array[];
-  totalAudioMs: number;
-  embedding: Promise<void> | null; // in-flight embedding guard
 }
 
 interface RingBuffer {
@@ -303,30 +284,33 @@ wss.on('connection', (clientWs: WebSocket) => {
   const sessionVoiceprintStore = new VoiceprintStore(
     `/tmp/session-vp-${Math.random().toString(36).slice(2)}.json`,
   );
-  // The robust resolver: online centroids + global assignment + hysteresis.
-  const resolver = new SpeakerIdentityResolver();
-  // Per-index audio accumulators (embed once enough speech is collected).
-  const segmentAccumulators = new Map<number, SegmentAccumulator>();
-  // Last shown name we told the client, per index — to send only on change.
-  const lastShownByIndex = new Map<number, string | null>();
+  // THE speaker mechanism: match each final's dominant-speaker audio to the
+  // nearest enrolled voiceprint (or a stable clustered unknown). Gives the turn
+  // AND the name together. Per-connection (holds the unknown clusters).
+  const matcher = new EnrolledSpeakerMatcher();
 
-  // Acoustic turn segmenter: decides the speaker label from the VOICE, replacing
-  // Deepgram's unreliable streaming index. Per-connection (stateful voice
-  // centroid). Names still come from the resolver, keyed by the effective turn.
-  const turnSegmenter = new TurnSegmenter(segmenterCfg);
+  // The matcher returns a STRING speakerKey per identity (a voiceprint id, or
+  // "unk:N"). The client's `speaker` field is a small integer used as a turn id
+  // and as the key for speaker_identified. Map each key → a stable int the first
+  // time we see it, so the same person keeps the same client id all session.
+  const keyToClientId = new Map<string, number>();
+  let nextClientId = 0;
+  // Last name we emitted to the client for each client id — emit on change only.
+  const nameByClientId = new Map<number, string>();
   // Buffers the current final's dominant-speaker audio until it reaches
-  // RESEGMENT_MIN_MS, so each acoustic decision sees enough voiced speech.
+  // MATCH_MIN_MS, so each match sees enough voiced speech to attribute reliably.
   let resegBuf: Uint8Array[] = [];
   let resegBufMs = 0;
-  // The effective speaker id we last sent (the segmenter's turn counter). Used
-  // as the provisional label before/at a final, and what the client splits on.
+  // The Deepgram dominant index the current resegBuf is accruing for. When a new
+  // final's dominant index differs, we DROP the partial buffer rather than glue
+  // two likely-different turns into one match window — Deepgram's index is noisy
+  // for naming, but a change between finals is still a useful "something shifted"
+  // hint, and gluing across it produces a blended window that matches no one.
+  let resegDgIndex = -1;
+  // The client id we last attributed a final to. Used as the provisional label
+  // for interims (text flows under it; the next final corrects the tag) and as
+  // the fallback when a final hasn't accrued enough audio to match yet.
   let lastEffectiveSpeaker = 0;
-  // Naming bridge: the resolver names DEEPGRAM indices, but the client now labels
-  // turns by acoustic turn id. `turnForDgIndex` records which turn a DG index is
-  // currently riding on, so a `speaker_identified {dgIndex}` can be translated to
-  // the turn the user actually sees. `dgIndexForTurn` is the reverse (for logs).
-  const turnForDgIndex = new Map<number, number>();
-  const dgIndexForTurn = new Map<number, number>();
 
   // ─── Speaker identity helpers ──────────────────────────────
 
@@ -337,124 +321,44 @@ wss.on('connection', (clientWs: WebSocket) => {
     return speakerRings.get(speakerIndex)!;
   }
 
-  function getAccumulator(speakerIndex: number): SegmentAccumulator {
-    let acc = segmentAccumulators.get(speakerIndex);
-    if (!acc) {
-      acc = { audioChunks: [], totalAudioMs: 0, embedding: null };
-      segmentAccumulators.set(speakerIndex, acc);
+  /**
+   * Map a matcher speakerKey (string: a voiceprint id or "unk:N") to the stable
+   * small integer the client uses as its `speaker`/turn id. First sighting of a
+   * key assigns the next integer; the same person keeps it for the session.
+   */
+  function clientIdForKey(speakerKey: string): number {
+    let id = keyToClientId.get(speakerKey);
+    if (id === undefined) {
+      id = nextClientId++;
+      keyToClientId.set(speakerKey, id);
     }
-    return acc;
+    return id;
   }
 
   /**
-   * Feed a chunk of one speaker's audio. Once a segment has enough speech, we
-   * embed it and feed the embedding to the resolver, which re-derives the full
-   * index→name assignment and applies hysteresis. We then notify the client of
-   * any index whose *shown* name changed (identified OR un-identified).
+   * Tell the client the display name for a client id, but only when it changes
+   * (the matcher always supplies one — an enrolled name or "Speaker A/B"). This
+   * is what flips a turn's tag from a letter to the matched person's name; the
+   * caption engine merges consecutive same-name turns into one block.
    */
-  function feedSpeakerAudio(
-    speakerIndex: number,
-    audio: Uint8Array,
-    durationMs: number,
+  function emitNameIfChanged(
+    clientId: number,
+    name: string,
+    enrolled: boolean,
+    voiceprintId: string | null,
+    confidence: number,
   ): void {
-    if (sessionVoiceprintStore.size === 0) return; // nothing to match against
-    if (!embeddingProvider) return; // provider still initializing
-
-    const acc = getAccumulator(speakerIndex);
-    acc.audioChunks.push(audio);
-    acc.totalAudioMs += durationMs;
-
-    if (acc.totalAudioMs < SEGMENT_MIN_MS || acc.embedding) return;
-
-    // Snapshot + reset the accumulator for the next segment.
-    const segMs = acc.totalAudioMs;
-    const totalLen = acc.audioChunks.reduce((s, c) => s + c.length, 0);
-    const fullAudio = new Uint8Array(totalLen);
-    let offset = 0;
-    for (const chunk of acc.audioChunks) {
-      fullAudio.set(chunk, offset);
-      offset += chunk.length;
-    }
-    acc.audioChunks = [];
-    acc.totalAudioMs = 0;
-
-    const provider = embeddingProvider;
-    acc.embedding = (async () => {
-      try {
-        // Strip non-speech before embedding — silence is similar across all
-        // speakers and flattens the very differences we need.
-        const vad = detectVoiced(fullAudio);
-        const audioForEmbedding = vad.voicedMs >= 300 ? vad.voiced : fullAudio;
-        const weightSec = (vad.voicedMs > 0 ? vad.voicedMs : segMs) / 1000;
-
-        // GUARD: Deepgram's streaming diarizer can lump two voices under one
-        // index, making this segment a BLEND. Embedding a blend pollutes the
-        // voiceprint and is the root of "speaker B is two people → matched to
-        // me". Split the voiced audio, embed each half, and compare: a true
-        // single speaker's halves agree; a segment straddling a speaker change
-        // does not. If mixed, drop it (no evidence) rather than mismatch.
-        const hom = await assessSegmentHomogeneity(
-          audioForEmbedding,
-          (pcm, sr) => provider.extractEmbedding(pcm, sr),
-          homogeneityOpts,
-        );
-        if (!hom.homogeneous) {
-          console.log(`🚫 [SpeakerId] Dropped MIXED segment for index ${speakerIndex} (half-sim=${hom.halfSimilarity?.toFixed(2)}) — not matching, likely 2 voices on one Deepgram index`);
-          return;
-        }
-
-        // Reuse the mean-of-halves embedding when we split-tested; otherwise the
-        // segment was too short to split — embed it whole as before.
-        const embedding = hom.embedding ?? await provider.extractEmbedding(audioForEmbedding, 16000);
-        // Weight evidence by the voiced duration of the segment (seconds).
-        const view = resolver.observe(speakerIndex, embedding, weightSec);
-        emitIdentityChanges(view);
-      } catch (err) {
-        console.error(`[SpeakerId] Error embedding speaker ${speakerIndex}:`, err);
-      } finally {
-        acc.embedding = null;
-      }
-    })();
-  }
-
-  /** Send speaker_identified / speaker_unidentified only when a name changes. */
-  function emitIdentityChanges(view: ReturnType<SpeakerIdentityResolver['current']>): void {
+    if (nameByClientId.get(clientId) === name) return;
+    nameByClientId.set(clientId, name);
     if (clientWs.readyState !== WebSocket.OPEN) return;
-    for (const id of view) {
-      const prev = lastShownByIndex.get(id.speakerIndex) ?? null;
-      if (id.shownName === prev) continue;
-      lastShownByIndex.set(id.speakerIndex, id.shownName);
-
-      // The resolver names DEEPGRAM indices, but the client labels turns by the
-      // acoustic turn id when re-segmentation is on — so translate to the turn
-      // this DG index is riding on. If we haven't mapped it yet (no acoustic
-      // decision for that index), skip: emitting under a raw DG index would
-      // name a "speaker" the client never shows. Off → pass the index through.
-      let clientId = id.speakerIndex;
-      if (RESEGMENT_ENABLED) {
-        const turn = turnForDgIndex.get(id.speakerIndex);
-        if (turn === undefined) continue;
-        clientId = turn;
-      }
-
-      if (id.shownName) {
-        console.log(`🎤 Speaker ${id.speakerIndex}→turn ${clientId} → "${id.shownName}" (conf=${id.confidence.toFixed(2)})`);
-        clientWs.send(JSON.stringify({
-          type: 'speaker_identified',
-          speakerIndex: clientId,
-          name: id.shownName,
-          voiceprintId: id.assignedVoiceprintId,
-          confidence: id.confidence,
-        }));
-      } else {
-        // Name was withdrawn (e.g. reassigned to another index after a flip).
-        console.log(`🎤 Speaker ${id.speakerIndex}→turn ${clientId} → unidentified`);
-        clientWs.send(JSON.stringify({
-          type: 'speaker_unidentified',
-          speakerIndex: clientId,
-        }));
-      }
-    }
+    console.log(`🎤 client ${clientId} → "${name}" (${enrolled ? 'enrolled' : 'unknown'}, conf=${confidence.toFixed(2)})`);
+    clientWs.send(JSON.stringify({
+      type: 'speaker_identified',
+      speakerIndex: clientId,
+      name,
+      voiceprintId,
+      confidence,
+    }));
   }
 
   // ─── Deepgram management ─────────────────────────────────────
@@ -508,12 +412,14 @@ wss.on('connection', (clientWs: WebSocket) => {
       // Fresh stream → re-ramp AGC gain from unity rather than a stale envelope
       // carried over from a previous (reconnected) Deepgram session.
       dgAgc.reset();
-      turnSegmenter.reset();
+      // Drop only the partial per-final audio buffer — a reconnect mid-stream
+      // resets Deepgram's word clock, so audio gathered against the old offset
+      // is stale. The matcher's clusters, the key→id map and the emitted names
+      // are deliberately KEPT: it's the same conversation with the same people,
+      // and re-deriving them would relabel everyone on every reconnect.
       resegBuf = [];
       resegBufMs = 0;
-      lastEffectiveSpeaker = 0;
-      turnForDgIndex.clear();
-      dgIndexForTurn.clear();
+      resegDgIndex = -1;
       console.log(`📍 Ring offset at Deepgram open: ${ringBytesAtDgOpen} bytes (${(ringBytesAtDgOpen / BYTES_PER_SEC).toFixed(2)}s)`);
       startKeepalive();
 
@@ -567,30 +473,22 @@ wss.on('connection', (clientWs: WebSocket) => {
         if (c > maxCount) { dgSpeaker = s; maxCount = c; }
       }
 
-      // ── Speaker label: acoustic turn id (preferred) or Deepgram index ──
-      // Deepgram's streaming index is unreliable for back-and-forth speech, so
-      // when re-segmentation is on we override it: embed this final's dominant-
-      // speaker audio and let TurnSegmenter decide the turn from the VOICE. The
-      // effective turn id is what the client splits turns on. Interims keep the
-      // last effective id (text already flows; the final corrects the tag).
-      let speaker = RESEGMENT_ENABLED ? lastEffectiveSpeaker : dgSpeaker;
-      let runs: Array<{ speaker: number; text: string }>;
-
-      if (RESEGMENT_ENABLED) {
-        if (isFinal) {
-          speaker = await resolveAcousticSpeaker(words, dgSpeaker);
-          lastEffectiveSpeaker = speaker;
-        }
-        // Under acoustic re-segmentation the whole transcript is one turn (the
-        // acoustic centroid is more trustworthy than Deepgram's intra-message
-        // split); the client renders it under the effective id.
-        runs = [{ speaker, text: alt.transcript }];
-      } else {
-        // Per-speaker RUNS from Deepgram's word labels: when it DID split an
-        // interruption mid-transcript, carry the boundary so the client renders
-        // each contiguous same-speaker run as its own turn. Single-speaker → one.
-        runs = speakerRuns(words).map((r) => ({ speaker: r.speaker, text: r.text }));
+      // ── Speaker label: from voiceprint MATCHING, not Deepgram's index ──
+      // Deepgram's streaming index is unreliable for back-and-forth speech, so we
+      // ignore it for attribution: on each final we embed the dominant speaker's
+      // audio and match it to the nearest enrolled voiceprint (or a clustered
+      // unknown). That match gives both the speaker id and the name. Interims
+      // keep the last attributed id — text flows immediately under it and the
+      // next final corrects the tag if the speaker actually changed.
+      let speaker = lastEffectiveSpeaker;
+      if (isFinal) {
+        speaker = await attributeSpeaker(words, dgSpeaker);
+        lastEffectiveSpeaker = speaker;
       }
+      // One turn per transcript under the attributed id: the matched identity is
+      // more trustworthy than Deepgram's intra-message split, and a real speaker
+      // change surfaces as a different attributed id on the NEXT final.
+      const runs = [{ speaker, text: alt.transcript }];
 
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(JSON.stringify({
@@ -609,9 +507,10 @@ wss.on('connection', (clientWs: WebSocket) => {
         }));
       }
 
-      // ── Speaker matching pipeline (finals only) ──────────────
+      // Keep the per-speaker ring buffers fed (used by enroll_from_buffer); the
+      // attribution above already consumed this final's audio for matching.
       if (isFinal && words.length > 0) {
-        runSpeakerMatchingPipeline(words);
+        fillSpeakerRings(words);
       }
     });
 
@@ -649,16 +548,32 @@ wss.on('connection', (clientWs: WebSocket) => {
   }
 
   /**
-   * Decide the effective speaker (acoustic turn id) for a final, overriding
-   * Deepgram's index. Extracts this final's dominant-speaker audio from the ring,
-   * accumulates across finals until ≥ RESEGMENT_MIN_MS of voiced speech, then
-   * embeds it and asks TurnSegmenter whether the voice changed. Until enough
-   * audio accrues — or if the embedder isn't ready — we keep the current turn
-   * (never split on a thin, noisy embedding). Returns the turn id to label with.
+   * Attribute a final to a speaker by VOICE MATCHING, overriding Deepgram's
+   * unreliable index. Extracts this final's dominant-speaker audio from the ring,
+   * accumulates across finals until ≥ MATCH_MIN_MS of voiced speech, then embeds
+   * it and matches to the nearest enrolled voiceprint (or a stable clustered
+   * unknown). The match gives the identity AND the name; we map its string key to
+   * a stable client integer and emit the name. Until enough audio accrues — or if
+   * the embedder isn't ready, or the segment is a two-voice blend — we keep the
+   * current speaker (never attribute on thin or mixed evidence). Returns the
+   * client speaker id to label this (and following interims) with.
    */
-  async function resolveAcousticSpeaker(words: any[], dgSpeaker: number): Promise<number> {
+  async function attributeSpeaker(words: any[], dgSpeaker: number): Promise<number> {
     if (!embeddingProvider) return lastEffectiveSpeaker; // no voice signal yet
+    const provider = embeddingProvider;
     const ringOffsetSec = ringBytesAtDgOpen / BYTES_PER_SEC;
+
+    // If Deepgram's dominant index changed since the audio currently buffered,
+    // drop the partial buffer: gluing this final's audio onto a different turn's
+    // would build a blended window. (-1 = empty buffer; first contribution sets
+    // the index.) This bounds — though can't eliminate — boundary-straddle blends
+    // at a fast speaker switch (when DG is late to flip, one window still spans
+    // two voices and may briefly mislabel, self-correcting on the next final).
+    if (resegBuf.length > 0 && resegDgIndex !== dgSpeaker) {
+      resegBuf = [];
+      resegBufMs = 0;
+    }
+    resegDgIndex = dgSpeaker;
 
     // Gather the dominant speaker's contiguous audio for THIS final.
     for (const w of words) {
@@ -672,42 +587,56 @@ wss.on('connection', (clientWs: WebSocket) => {
       resegBufMs += (end - start) * 1000;
     }
 
-    if (resegBufMs < RESEGMENT_MIN_MS) return lastEffectiveSpeaker; // not enough yet
+    if (resegBufMs < MATCH_MIN_MS) return lastEffectiveSpeaker; // not enough yet
 
-    // Concatenate + VAD-trim the accumulated audio, then embed once (~16ms).
+    // Snapshot + clear the accumulator before the await so an overlapping final
+    // starts a fresh window rather than re-matching this one's audio.
     const totalLen = resegBuf.reduce((s, c) => s + c.length, 0);
     const merged = new Uint8Array(totalLen);
     let off = 0;
     for (const c of resegBuf) { merged.set(c, off); off += c.length; }
     resegBuf = [];
     resegBufMs = 0;
+    resegDgIndex = -1;
 
     try {
       const vad = detectVoiced(merged);
       if (vad.voicedMs < 300) return lastEffectiveSpeaker; // mostly silence
-      const emb = await embeddingProvider.extractEmbedding(vad.voiced, 16000);
-      const dec = turnSegmenter.observe(emb);
-      if (dec.boundary && dec.effectiveSpeaker !== lastEffectiveSpeaker) {
-        console.log(`🔀 [TurnSegmenter] voice change → turn ${dec.effectiveSpeaker} (was ${lastEffectiveSpeaker}, DG idx ${dgSpeaker}, sim ${dec.similarity?.toFixed(2) ?? '—'})`);
+      const voiced = vad.voiced;
+
+      // NB: the half-split homogeneity guard is intentionally NOT applied here.
+      // Measured on real audio (scripts/measure-homogeneity.mts) the ONNX ECAPA
+      // embedder's same-speaker half-window cosines (0.03–0.49) fully OVERLAP its
+      // mixed A|B half-window cosines (−0.16–0.29): at ~750ms halves the
+      // embedding is phoneme- not speaker-dominated, so no threshold separates
+      // them. The guard would reject essentially every real window (it did — all
+      // finals dropped as "MIXED"). Attribution is robust without it: the matcher
+      // scores the correct enrolled voice ~0.8+ vs a wrong one ~0.2 at this 1.5s
+      // window. If two voices truly share one window the worst case is one
+      // mislabeled ~1.5s turn, self-correcting on the next final — far better than
+      // showing nothing. A real blend-defense needs a proper diarizer, not this.
+      const emb = await provider.extractEmbedding(voiced, 16000);
+      const r = matcher.match(emb);
+      const clientId = clientIdForKey(r.speakerKey);
+      emitNameIfChanged(clientId, r.name, r.enrolled, r.enrolled ? r.speakerKey : null, r.confidence);
+      if (clientId !== lastEffectiveSpeaker) {
+        console.log(`🔀 [SpeakerMatch] speaker change → client ${clientId} "${r.name}" (was ${lastEffectiveSpeaker}, DG idx ${dgSpeaker}, conf ${r.confidence.toFixed(2)})`);
       }
-      // Record which turn this DG index is currently riding on, so resolver
-      // names (keyed by DG index) can be surfaced under the acoustic turn.
-      turnForDgIndex.set(dgSpeaker, dec.effectiveSpeaker);
-      dgIndexForTurn.set(dec.effectiveSpeaker, dgSpeaker);
-      return dec.effectiveSpeaker;
+      return clientId;
     } catch (err) {
-      console.error('[TurnSegmenter] embed failed:', err);
+      console.error('[SpeakerMatch] embed/match failed:', err);
       return lastEffectiveSpeaker;
     }
   }
 
-  /** Extract per-speaker PCM chunks from global ring buffer and feed to matching */
-  function runSpeakerMatchingPipeline(words: any[]): void {
+  /**
+   * Keep the per-speaker ring buffers fed from the global ring (so a wearer can
+   * enroll someone retroactively via enroll_from_buffer). Keyed by Deepgram's
+   * index — fine here: this is just an audio store for later enrollment, not the
+   * attribution path (matching, above, decides who's speaking).
+   */
+  function fillSpeakerRings(words: any[]): void {
     const ringOffsetSec = ringBytesAtDgOpen / BYTES_PER_SEC;
-
-    // Group word time ranges by speaker index
-    // Deepgram timestamps are relative to first audio byte Deepgram received.
-    // Adjust by ringOffsetSec to map into the global ring buffer.
     const speakerRanges = new Map<number, Array<{ start: number; end: number }>>();
     for (const w of words) {
       const s: number = w.speaker ?? 0;
@@ -720,24 +649,11 @@ wss.on('connection', (clientWs: WebSocket) => {
     }
 
     for (const [speakerIndex, ranges] of speakerRanges) {
-      // Always keep filling the per-speaker ring (used for enroll_from_buffer),
-      // and feed the identity pipeline. The resolver decides identity — there's
-      // no "already identified, stop" short-circuit, so a flipped index recovers.
       const speakerRing = getSpeakerRing(speakerIndex);
-      let nullCount = 0;
-
       for (const range of ranges) {
         const audio = extractTimeRange(globalRing, range.start, range.end);
-        if (!audio || audio.length < 2) { nullCount++; continue; }
-
-        const durationMs = (range.end - range.start) * 1000;
+        if (!audio || audio.length < 2) continue;
         writeRingBuffer(speakerRing, audio);
-        // Feed the identity pipeline (accumulates, embeds, resolves).
-        feedSpeakerAudio(speakerIndex, audio, durationMs);
-      }
-
-      if (nullCount > 0) {
-        console.log(`⚠️  Speaker ${speakerIndex}: ${nullCount}/${ranges.length} word ranges returned null (ring=${globalRing.totalBytesWritten}B, offset=${ringBytesAtDgOpen}B)`);
       }
     }
   }
@@ -985,11 +901,14 @@ wss.on('connection', (clientWs: WebSocket) => {
 
           console.log(`👤 Loaded ${voiceprints.length} voiceprints for session`);
 
-          // Hand the voiceprints to the resolver. It keeps the per-index voice
-          // centroids it has already built, so voices heard before enrollment
-          // get re-scored on the next segment and can be identified immediately.
-          resolver.setVoiceprints(
-            voiceprints.map((v) => ({ id: v.id, name: v.name, embedding: v.embedding })),
+          // Hand the voiceprints to the matcher — this is the enrolled set every
+          // subsequent final is matched against. Voices heard before this load
+          // were attributed to unknown clusters; from the next match on, anyone
+          // who matches an enrolled print gets that print's stable key (a new
+          // client id) and their real name, so they self-correct without a
+          // bridge. Keeps existing unknown clusters for still-unenrolled voices.
+          matcher.setEnrolled(
+            voiceprints.map((v): MatcherVoiceprint => ({ id: v.id, name: v.name, embedding: v.embedding })),
           );
           break;
         }

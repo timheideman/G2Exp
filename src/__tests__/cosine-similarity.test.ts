@@ -3,7 +3,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { cosineSimilarity } from '../server/speaker-matcher';
+// cosineSimilarity was the helper exported by the (now-retired) speaker-matcher;
+// the identical cosine math lives on the EnrolledSpeakerMatcher module. Aliased
+// so these assertions keep testing the same function under its original name.
+import { cosine as cosineSimilarity } from '../server/enrolled-speaker-matcher';
 
 describe('cosineSimilarity', () => {
   it('returns 1.0 for identical vectors', () => {
