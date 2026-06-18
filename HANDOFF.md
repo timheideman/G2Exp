@@ -137,29 +137,51 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
   Together these fix the "new line broke my sentence the instant my name was
   assigned" bug: an index flip / rename no longer starts a new line. A genuinely
   different speaker (different resolved tag) still breaks to a new line.
-- **No smooth motion / pixel animation exists — verified against the full SDK
-  type defs + official docs (Jun 2026).** The bridge has exactly 5 display calls:
-  `createStartUpPageContainer`, `rebuildPageContainer`, `updateImageRawData`,
-  `textContainerUpgrade`, `shutDownPageContainer`. Docs state plainly: *"no
-  programmatic scroll position, no animations… no arbitrary pixel drawing."* So
-  the smooth right-to-left "Japanese-TV ticker" slide is NOT reproducible via the
-  text system — all text motion is discrete whole-line steps on string updates,
-  capped at the ~3/sec BLE rate. Two levers we are NOT yet using, if scroll
-  jolt becomes a real fatigue problem (parked as polish — Tim's call):
-  - **`textContainerUpgrade` tail-splice:** `contentOffset`/`contentLength` send
-    only the changed tail instead of the whole string. Docs: *"faster than a full
-    rebuild and flicker-free on hardware."* Our HANDOFF previously called this
-    "unverified" — the official docs now confirm it. Lowest-risk way to soften
-    the re-wrap jolt; still discrete, no pixel glide.
-  - **Bitmap re-blit (high risk, unverified speed):** `ImageRawDataUpdate` /
-    `ImageRawDataUpdateFields` is actually a FRAGMENTED + COMPRESSED transfer
-    (`mapSessionId`, `mapTotalSize`, `mapFragmentIndex`, `mapFragmentPacketSize`,
-    `compressMode`) — NOT the "one slow 1.6–3s full blit" the old note claimed.
-    But: image width caps at 288 (HALF the 576 panel → a full-width ticker needs
-    two side-by-side image containers), `updateImageRawData` forbids concurrent
-    sends, and NO frame-rate figure is documented. Whether it can re-blit fast
-    enough to animate is unknown and would need an on-device FPS probe before any
-    bet. Pursuing it = rebuilding the caption renderer in pixels.
+- **Smooth full-screen caption scrolling is NOT achievable on G2 today — settled
+  via official docs + full SDK type defs + real third-party app code + on-device
+  FPS measurements (Jun 2026).** This was investigated hard (Tim rightly pushed:
+  "but danmaku apps DO slide text"). The complete answer:
+  - *SDK surface:* the bridge has exactly 5 display calls
+    (`createStartUpPageContainer`, `rebuildPageContainer`, `updateImageRawData`,
+    `textContainerUpgrade`, `shutDownPageContainer`). Docs: *"no programmatic
+    scroll position, no animations… no arbitrary pixel drawing."* No text-motion
+    API; text updates are discrete whole-string replaces at the ~3/sec BLE rate.
+  - *Images ARE fully supported (earlier "useless" note was WRONG).*
+    `updateImageRawData` takes a standard **1-bit BMP file binary** (14-byte file
+    header + 40-byte info header + 8-byte color table + bottom-up, 4-byte-aligned
+    rows; bpp=1, two-color palette). Working encoder: `bigdra50/eveng2-demo`
+    `src/utils/bmp.ts` (`encode1bitBmp`); other image apps: EvenChess. A 200×100
+    image renders fine. NOT capped at 288 wide for a single container in practice
+    (demo uses 200; ImageContainerProperty width range is 20–288 per type def, so
+    full 576 width needs two side-by-side tiles).
+  - *Why images can't carry smooth FULL-SCREEN motion — MEASURED:* `bigdra50`
+    benchmarked GIF→BMP→`updateImageRawData` on real hardware: **50×50 px ≈ 4 FPS
+    ("barely recognizable"), 30×30 px ≈ 9 FPS ("looks like it's moving")**;
+    conclusion *"does not function as an animation"* at any real size. Cause:
+    `updateImageRawData` SERIALIZES (must `await` each full transfer before the
+    next) + BLE bandwidth. A 576×288 frame is ~33× a 50×50 → well under 1 FPS =
+    slideshow, not glide.
+  - *How danmaku apps (e.g. akkeylab's) actually slide text:* small SPRITES. A
+    short comment is a tiny BMP, squarely in the ~9 FPS "looks like it's moving"
+    regime — so sprite motion works, but a full-width live transcript is the
+    worst case (full-screen redraw) and stays <1 FPS. Danmaku ≠ captions.
+  - *The one genuine unknown:* the raw BLE protocol (`i-soxi/even-g2-protocol`)
+    exposes a **rendering channel `0x6402`** the high-level SDK hides — apps CAN
+    bypass the SDK and drive BLE directly. Whether `0x6402` has a native
+    smooth-scroll opcode is UNDOCUMENTED/unproven (no public opcodes, no app found
+    using it for scroll). Going there = off-SDK (submission/stability risk) and a
+    reverse-engineering project. Parked.
+  - *Ecosystem norm for long text:* click-to-advance pagination between pre-built
+    content blocks (official `text-heavy` template AND `bigdra50` `display.ts`);
+    nobody uses `contentOffset` tail-splice or animates.
+  - *If scroll jolt ever needs softening (polish, parked — Tim's call):* the
+    lowest-risk lever is `textContainerUpgrade` `contentOffset`/`contentLength`
+    tail-splice (docs: *"faster than a full rebuild and flicker-free on
+    hardware"*) — still discrete, no pixel glide, but avoids the full re-wrap.
+  - *Actionable finding from this dig:* third-party docs (`even-toolkit`) state
+    the panel holds **~10 text lines**, not 7 — so `LIVE_WINDOW_CHARS` (currently
+    460, ≈7 lines) likely UNDER-fills the vertical space. Bumping it toward ~640
+    is the real, low-risk improvement available on the supported text path.
 - **BLE display update ceiling ~3/sec.** `app.ts` throttles to 300ms
   (`GLASSES_UPDATE_INTERVAL_MS`) with newest-wins coalescing. Updating faster is
   dropped/coalesced by the firmware anyway.
@@ -246,6 +268,40 @@ Node server (src/server/index.ts)  →  Deepgram Nova-3 (cloud STT + diarization
   accept floor between your real correct-match and wrong-match distributions. (4)
   Validate with `scripts/replay-ws-server.mts [--enroll]` (drives the live server
   over WS) and `scripts/replay-matcher.mts` (offline matcher logic).
+- **🔴 VERIFIED on-device (Jun 18) — two real findings from a 0-contact monologue
+  test (Tim solo, no voiceprints loaded). Both confirmed in source, both await a
+  UX decision from Tim before any fix:**
+  - **(A) `speaker_identified` is overloaded → the "✅ recognized" badge lies.**
+    `emitNameIfChanged` (server) sends `type: 'speaker_identified'` for EVERY
+    match — enrolled voiceprint AND blind unknown cluster alike (the cluster's
+    "Speaker A/B/C" name). The client's `handleSpeakerIdentified` (main.ts:211)
+    then stamps `sessionLabels` `type='identified'`, and `updateSpeakersPanel`
+    (main.ts:430-436) renders that as the green `✅ recognized` badge. Result: in
+    Tim's test, FOUR blind clusters of his single voice all showed "✅ recognized"
+    despite zero enrolled contacts. The badge code is correct; the SERVER is
+    mislabeling unenrolled clusters as identified. Fix direction (Tim to confirm):
+    the server should distinguish "matched enrolled voiceprint" from "assigned an
+    unknown cluster label" — e.g. an `enrolled: boolean` on the message (the
+    matcher already returns it) — and the client should only show `✅ recognized`
+    when `enrolled === true`; unenrolled clusters read as tentative/unknown.
+  - **(B) The fragmentation (1 voice → 4 speakers) was the BLIND-CLUSTER path, and
+    the thresholds are MFCC-era on an ONNX backend.** With 0 contacts the matcher
+    can only blind-cluster. Tim's own voice scored unknown-cluster cosines of
+    0.41–0.69 across consecutive ~1.5s windows vs `unknownMergeThreshold: 0.40`,
+    so it straddled the merge line — sometimes merging, sometimes spawning a new
+    "stranger" (conf=1.00). Root cause: `acceptThreshold 0.45` / `mergeThreshold
+    0.40` and the "wrong~0.2, correct~0.8" code comments are from the **MFCC**
+    embedder, but the running backend is **ONNX ECAPA**, whose self-check reports
+    same-voice cos=0.973 / **diff-voice cos=0.745** — a totally different, higher,
+    compressed scale. So `acceptThreshold 0.45` is ALSO miscalibrated for the
+    enrolled path (a stranger at ~0.74 could falsely match an enrolled person).
+    These thresholds need re-deriving for ONNX (the calibration bullet above).
+  - **Enrollment UX is MORE complete than expected** (mapped Jun 18): mic enroll,
+    retroactive `enroll_from_buffer`, persistent localStorage contacts w/
+    multi-sample averaging, export/import — all WIRED + tested. Gaps are polish:
+    no confidence/quality feedback, no mode-switch feedback ("matching against N
+    voiceprints"), retroactive-enroll affordance is buried (only via the modal).
+    Tim's steer: prioritize USABLE UX, calibrate live with a real 2nd speaker.
 - **Accrual resets on a Deepgram index change between finals** (`resegDgIndex` in
   `attributeSpeaker`, added Jun 16 — Tim's call): drops the partial match buffer so
   a window won't glue two turns Deepgram itself split. Bounds cross-final straddle

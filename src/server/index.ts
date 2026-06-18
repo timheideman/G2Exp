@@ -16,7 +16,12 @@ import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import type { ListenLiveClient } from '@deepgram/sdk';
 import { VoiceprintStore } from './voiceprint-store';
 import { detectVoiced } from './vad';
-import { EnrolledSpeakerMatcher, type MatcherVoiceprint } from './enrolled-speaker-matcher';
+import {
+  EnrolledSpeakerMatcher,
+  type MatcherVoiceprint,
+  type VerboseMatchResult,
+} from './enrolled-speaker-matcher';
+import { SpeakerMatchLogger } from './speaker-match-logger';
 import { assessEnrollmentQuality } from './enrollment-quality';
 import { createEmbeddingProvider } from './embedding-provider-factory';
 import type { EmbeddingProvider } from '../types/speaker';
@@ -35,9 +40,26 @@ if (!DG_API_KEY) {
   process.exit(1);
 }
 
-const deepgramUrl = DG_REGION === 'eu'
-  ? 'https://api.eu.deepgram.com'
-  : undefined;
+// Deepgram's EU endpoint (api.eu.deepgram.com) is NOT directly reachable: per
+// Deepgram's own SDK docs it is only served behind a GDPR/enterprise-provisioned
+// proxy that YOU deploy in-region and point at via baseUrl. Hitting the bare host
+// resolves to nothing public (DNS times out / 404), so the WebSocket upgrade fails
+// with an opaque ErrorEvent — exactly the "Deepgram error: ErrorEvent {}" loop.
+// Default to the US endpoint; only override via DG_EU_PROXY_URL when you actually
+// run such a proxy. Setting DG_REGION=eu without a proxy URL is a misconfiguration.
+const DG_EU_PROXY_URL = process.env.DG_EU_PROXY_URL;
+let deepgramUrl: string | undefined;
+if (DG_REGION === 'eu') {
+  if (!DG_EU_PROXY_URL) {
+    console.error(
+      '❌ DG_REGION=eu requires DG_EU_PROXY_URL (an EU proxy forwarding to ' +
+      'api.eu.deepgram.com). api.eu.deepgram.com is not directly reachable. ' +
+      'Use DG_REGION=us or set DG_EU_PROXY_URL.'
+    );
+    process.exit(1);
+  }
+  deepgramUrl = DG_EU_PROXY_URL;
+}
 
 const deepgram = createClient(DG_API_KEY, {
   global: { url: deepgramUrl },
@@ -203,6 +225,19 @@ const DIARIZE_LOG_PATH =
     ? null
     : process.env.DIARIZE_LOG || '/tmp/g2-diarize.log';
 
+// ─── Speaker-match diagnostic log ────────────────────────────────────────────
+// Per-match record of what the enrolled-voice matcher decided AND why — the full
+// enrolled scoreboard, the top-1↔top-2 margin, and swap / low-margin flags. This
+// is how an on-device session becomes data: wear the glasses, talk with people,
+// then read this log to (a) confirm/quantify any name-swap, and (b) tune
+// `acceptThreshold` from the real gap between right (~0.6–0.8) and wrong (~0.2)
+// matches. Defaults ON to a temp file; SPK_MATCH_LOG=/path to relocate, =off to
+// disable. A summary block is appended when the client disconnects.
+const SPK_MATCH_LOG_PATH =
+  process.env.SPK_MATCH_LOG === 'off'
+    ? null
+    : process.env.SPK_MATCH_LOG || '/tmp/g2-speaker-match.log';
+
 /** Collapse a word list into contiguous same-speaker runs (for logging). */
 function speakerRuns(words: any[]): Array<{ speaker: number; text: string }> {
   const runs: Array<{ speaker: number; text: string }> = [];
@@ -288,6 +323,10 @@ wss.on('connection', (clientWs: WebSocket) => {
   // nearest enrolled voiceprint (or a stable clustered unknown). Gives the turn
   // AND the name together. Per-connection (holds the unknown clusters).
   const matcher = new EnrolledSpeakerMatcher();
+  // Records every match (when SPK_MATCH_LOG is on) so a real session is
+  // measurable after the fact — swap detection + cosine distributions for
+  // threshold tuning. Recording only; never influences attribution.
+  const matchLogger = SPK_MATCH_LOG_PATH ? new SpeakerMatchLogger() : null;
 
   // The matcher returns a STRING speakerKey per identity (a voiceprint id, or
   // "unk:N"). The client's `speaker` field is a small integer used as a turn id
@@ -297,6 +336,9 @@ wss.on('connection', (clientWs: WebSocket) => {
   let nextClientId = 0;
   // Last name we emitted to the client for each client id — emit on change only.
   const nameByClientId = new Map<number, string>();
+  // Rolling window of recent match cosines, for the live calibration UI to show
+  // where the wearer's voice is landing (e.g. "0.41 0.69 0.50 0.42").
+  const recentCosines: number[] = [];
   // Buffers the current final's dominant-speaker audio until it reaches
   // MATCH_MIN_MS, so each match sees enough voiced speech to attribute reliably.
   let resegBuf: Uint8Array[] = [];
@@ -358,6 +400,73 @@ wss.on('connection', (clientWs: WebSocket) => {
       name,
       voiceprintId,
       confidence,
+      // True only for a real enrolled-voiceprint hit; false for a blind unknown
+      // cluster ("Speaker A/B/C"). The client shows "✅ recognized" only when
+      // true — an unenrolled cluster stays an unconfirmed letter for the wearer
+      // to name. (Was missing → every cluster wrongly read as "recognized".)
+      enrolled,
+    }));
+  }
+
+  /**
+   * Record a verbose match for diagnostics and append a live one-liner to the
+   * speaker-match log. No-op unless SPK_MATCH_LOG is on. Never throws into the
+   * stream.
+   */
+  function recordSpeakerMatch(
+    r: VerboseMatchResult,
+    clientId: number,
+    dgIndex: number,
+    voicedMs: number,
+  ): void {
+    if (!matchLogger || !SPK_MATCH_LOG_PATH) return;
+    const rec = matchLogger.record(r, clientId, dgIndex, Math.round(voicedMs));
+    const flags = `${rec.swap ? ' «SWAP»' : ''}${rec.lowMargin ? ' «LOW-MARGIN»' : ''}`;
+    const margin = Number.isFinite(rec.topMargin) ? rec.topMargin.toFixed(2) : '—';
+    const line =
+      `client=${rec.clientId} dg=${rec.dgIndex} ${rec.enrolled ? 'ENROLLED' : 'unknown '} ` +
+      `"${rec.name}" conf=${rec.confidence.toFixed(2)} margin=${margin} ` +
+      `voiced=${rec.voicedMs}ms top=[${rec.top.join(', ')}]${flags}`;
+    try {
+      appendFileSync(SPK_MATCH_LOG_PATH, `${line}\n`);
+    } catch {
+      /* diagnostics must never break the stream */
+    }
+  }
+
+  /**
+   * Push live calibration telemetry to the client after each match: how many
+   * distinct speakers have been detected this session, the last match (name +
+   * cosine + enrolled?), and a rolling window of recent cosines. This is what
+   * makes the phone tuning UI a real calibration tool — slide a threshold and
+   * watch the speaker count / cosines respond on the next utterance. Always on
+   * (cheap, one small JSON per ~1.5s); the client ignores it if the panel's shut.
+   */
+  function emitMatcherTelemetry(
+    r: VerboseMatchResult,
+    clientId: number,
+    voicedMs: number,
+  ): void {
+    recentCosines.push(r.confidence);
+    if (recentCosines.length > 8) recentCosines.shift();
+    if (clientWs.readyState !== WebSocket.OPEN) return;
+    clientWs.send(JSON.stringify({
+      type: 'matcher_telemetry',
+      // Distinct speakers attributed so far this session (the count that
+      // balloons when blind clustering over-splits one real voice).
+      speakerCount: keyToClientId.size,
+      enrolledCount: matcher.enrolledCount,
+      last: {
+        clientId,
+        name: r.name,
+        enrolled: r.enrolled,
+        confidence: Number(r.confidence.toFixed(3)),
+        topMargin: Number.isFinite(r.topMargin) ? Number(r.topMargin.toFixed(3)) : null,
+        voicedMs,
+        // Top enrolled scores "name:sim" (empty when nobody enrolled).
+        top: r.enrolledScores.slice(0, 3).map((s) => ({ name: s.name, sim: Number(s.sim.toFixed(3)) })),
+      },
+      recentCosines: recentCosines.map((c) => Number(c.toFixed(3))),
     }));
   }
 
@@ -521,13 +630,28 @@ wss.on('connection', (clientWs: WebSocket) => {
     });
 
     dgConnection.on(LiveTranscriptionEvents.Error, (err) => {
-      console.error('❌ Deepgram error:', err);
+      // The SDK often hands back a bare WebSocket ErrorEvent whose useful detail
+      // is nested (err.error / err.reason / underlying message), not on err.message.
+      // Dig it out so the log isn't just "ErrorEvent {}" — that opacity is what
+      // makes a bad endpoint/key impossible to diagnose at a glance.
+      const e = err as any;
+      const detail =
+        e?.message ||
+        e?.error?.message ||
+        e?.error ||
+        e?.reason ||
+        (typeof e === 'string' ? e : '') ||
+        'unknown (likely WebSocket handshake failure — check key, region/endpoint, credits)';
+      console.error(
+        `❌ Deepgram error: ${detail}` +
+        ` [type=${e?.type ?? 'n/a'} target=${deepgramUrl ?? 'api.deepgram.com (US default)'}]`
+      );
       // Surface to the client so captioning never fails silently.
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(JSON.stringify({
           type: 'error',
-          code: (err as any)?.type || 'deepgram_error',
-          message: (err as any)?.message || 'Transcription service error',
+          code: e?.type || 'deepgram_error',
+          message: detail,
         }));
       }
     });
@@ -616,9 +740,15 @@ wss.on('connection', (clientWs: WebSocket) => {
       // mislabeled ~1.5s turn, self-correcting on the next final — far better than
       // showing nothing. A real blend-defense needs a proper diarizer, not this.
       const emb = await provider.extractEmbedding(voiced, 16000);
-      const r = matcher.match(emb);
+      // Always take the verbose match: it delegates the DECISION to match() (so
+      // behavior is identical) and the extra cost is just the cosines we'd
+      // compute anyway. Its scoreboard feeds both the optional file log and the
+      // live calibration telemetry below.
+      const r = matcher.matchVerbose(emb);
       const clientId = clientIdForKey(r.speakerKey);
       emitNameIfChanged(clientId, r.name, r.enrolled, r.enrolled ? r.speakerKey : null, r.confidence);
+      if (matchLogger) recordSpeakerMatch(r, clientId, dgSpeaker, vad.voicedMs);
+      emitMatcherTelemetry(r, clientId, Math.round(vad.voicedMs));
       if (clientId !== lastEffectiveSpeaker) {
         console.log(`🔀 [SpeakerMatch] speaker change → client ${clientId} "${r.name}" (was ${lastEffectiveSpeaker}, DG idx ${dgSpeaker}, conf ${r.confidence.toFixed(2)})`);
       }
@@ -783,6 +913,32 @@ wss.on('connection', (clientWs: WebSocket) => {
 
           if (configChanged && dgConnection) {
             openDeepgram(config);
+          }
+          break;
+        }
+
+        // ── Live matcher calibration (from the phone tuning UI) ──
+        // Push new acceptThreshold / unknownMergeThreshold into the matcher
+        // mid-session so the wearer can tune on real back-and-forth and watch
+        // the effect immediately (the telemetry below reflects the new values
+        // on the next match). Values are clamped to a sane cosine range;
+        // omitted fields are left unchanged. Not persisted server-side — the
+        // client owns the chosen values and re-sends them each session.
+        case 'set_matcher_config': {
+          const clamp = (v: unknown): number | undefined =>
+            typeof v === 'number' && Number.isFinite(v)
+              ? Math.min(0.99, Math.max(0, v))
+              : undefined;
+          const accept = clamp(msg.acceptThreshold);
+          const merge = clamp(msg.unknownMergeThreshold);
+          const patch: Record<string, number> = {};
+          if (accept !== undefined) patch.acceptThreshold = accept;
+          if (merge !== undefined) patch.unknownMergeThreshold = merge;
+          if (Object.keys(patch).length > 0) {
+            matcher.setConfig(patch);
+            console.log(
+              `🎚️  Matcher config: accept=${accept ?? '—'} merge=${merge ?? '—'}`,
+            );
           }
           break;
         }
@@ -1009,7 +1165,45 @@ wss.on('connection', (clientWs: WebSocket) => {
     if (dgConnection && isDeepgramOpen) {
       try { dgConnection.requestClose(); } catch {}
     }
+    dumpSpeakerMatchSummary();
   });
+
+  /**
+   * Append the session read-out to the speaker-match log: totals, swap and
+   * low-margin counts, the accepted-vs-rejected cosine distributions, and a
+   * suggested acceptThreshold (the midpoint between the two when they separate).
+   * This is the number to read after wearing the glasses through a real
+   * conversation. No-op unless SPK_MATCH_LOG is on.
+   */
+  function dumpSpeakerMatchSummary(): void {
+    if (!matchLogger || !SPK_MATCH_LOG_PATH) return;
+    const s = matchLogger.summary();
+    if (s.totalMatches === 0) return;
+    const fx = (st: { n: number; min: number; max: number; mean: number }) =>
+      st.n === 0 ? 'none' : `n=${st.n} min=${st.min.toFixed(2)} mean=${st.mean.toFixed(2)} max=${st.max.toFixed(2)}`;
+    const lines = [
+      '',
+      '════════ SPEAKER-MATCH SESSION SUMMARY ════════',
+      `matches=${s.totalMatches} (enrolled=${s.enrolledMatches}, unknown=${s.unknownMatches})`,
+      `⚠️  swaps=${s.swaps}   low-margin accepts=${s.lowMarginAccepts}`,
+      `accepted-enrolled cosine: ${fx(s.acceptedEnrolled)}`,
+      `rejected-best cosine:     ${fx(s.rejectedBest)}`,
+      `suggested acceptThreshold: ${
+        s.suggestedAcceptThreshold === null
+          ? 'N/A (accepted/rejected cosine ranges overlap — no clean split)'
+          : s.suggestedAcceptThreshold.toFixed(2)
+      }`,
+      `(current acceptThreshold default = 0.45)`,
+      '═══════════════════════════════════════════════',
+      '',
+    ];
+    try {
+      appendFileSync(SPK_MATCH_LOG_PATH, lines.join('\n'));
+      console.log(`📊 Speaker-match summary written to ${SPK_MATCH_LOG_PATH} (swaps=${s.swaps}, matches=${s.totalMatches})`);
+    } catch {
+      /* diagnostics must never break shutdown */
+    }
+  }
 
   clientWs.on('error', (err) => {
     console.error('❌ Client error:', err);

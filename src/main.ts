@@ -193,6 +193,12 @@ function rewrapWsOnMessage(): void {
         updateSpeakersPanel();
         return;
       }
+
+      // 2c. Live matcher telemetry → the speaker-tuning readout.
+      if (msg.type === 'matcher_telemetry') {
+        updateTuningReadout(msg);
+        return;
+      }
     } catch {
       // Binary or non-JSON — pass through
     }
@@ -213,9 +219,20 @@ function handleSpeakerIdentified(msg: {
   name: string;
   voiceprintId: string | null;
   confidence: number;
+  enrolled?: boolean;
 }): void {
-  sessionLabels.applyServerIdentification(msg.speakerIndex, msg.name, msg.voiceprintId);
-  debugLog(`✅ Identified speaker ${msg.speakerIndex} as "${msg.name}" (${(msg.confidence * 100).toFixed(1)}%)`);
+  // Only an enrolled voiceprint hit is a confirmed identity (→ "✅ recognized").
+  // An unenrolled match is a blind cluster label; treat it as unconfirmed so the
+  // wearer — the source of truth for who A/B/C are — names them when ready.
+  // Back-compat: if the server omits `enrolled`, infer it from a real
+  // voiceprintId (clusters carry none).
+  const enrolled = msg.enrolled ?? msg.voiceprintId !== null;
+  sessionLabels.applyServerIdentification(msg.speakerIndex, msg.name, msg.voiceprintId, enrolled);
+  debugLog(
+    enrolled
+      ? `✅ Identified speaker ${msg.speakerIndex} as "${msg.name}" (${(msg.confidence * 100).toFixed(1)}%)`
+      : `· speaker ${msg.speakerIndex} unconfirmed cluster (${msg.name})`,
+  );
   updateSpeakersPanel();
 }
 
@@ -881,6 +898,85 @@ initNameAlertSettings();
   return s;
 };
 
+// ─── Speaker tuning (live matcher calibration) ────────────────
+//
+// Two sliders push the matcher's accept/merge thresholds to the server live, and
+// the server streams back `matcher_telemetry` (speaker count, last-match cosine,
+// recent cosines) so the wearer can tune on real speech and SEE the effect — the
+// fix for one voice over-splitting into A/B/C. Values persist to localStorage and
+// are re-sent on (re)connect so a session always starts with the wearer's choice.
+
+const TUNE_ACCEPT_KEY = 'matcher.acceptThreshold';
+const TUNE_MERGE_KEY = 'matcher.unknownMergeThreshold';
+
+function sendMatcherConfig(): void {
+  const ws = (app as any).ws as WebSocket | null;
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const accept = parseFloat(localStorage.getItem(TUNE_ACCEPT_KEY) || '0.45');
+  const merge = parseFloat(localStorage.getItem(TUNE_MERGE_KEY) || '0.40');
+  ws.send(JSON.stringify({
+    type: 'set_matcher_config',
+    acceptThreshold: accept,
+    unknownMergeThreshold: merge,
+  }));
+}
+
+function initSpeakerTuning(): void {
+  const accept = document.getElementById('tune-accept') as HTMLInputElement | null;
+  const merge = document.getElementById('tune-merge') as HTMLInputElement | null;
+  const acceptVal = document.getElementById('tune-accept-val');
+  const mergeVal = document.getElementById('tune-merge-val');
+  if (!accept || !merge) return;
+
+  // Restore saved thresholds into the sliders.
+  const savedAccept = localStorage.getItem(TUNE_ACCEPT_KEY);
+  const savedMerge = localStorage.getItem(TUNE_MERGE_KEY);
+  if (savedAccept) accept.value = savedAccept;
+  if (savedMerge) merge.value = savedMerge;
+  if (acceptVal) acceptVal.textContent = accept.value;
+  if (mergeVal) mergeVal.textContent = merge.value;
+
+  // Debounce the WS push so dragging doesn't spam the server; the value label
+  // updates instantly for responsiveness.
+  let pushTimer: ReturnType<typeof setTimeout> | null = null;
+  const onInput = (slider: HTMLInputElement, label: HTMLElement | null, key: string) => {
+    if (label) label.textContent = slider.value;
+    localStorage.setItem(key, slider.value);
+    if (pushTimer) clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => sendMatcherConfig(), 120);
+  };
+  accept.addEventListener('input', () => onInput(accept, acceptVal, TUNE_ACCEPT_KEY));
+  merge.addEventListener('input', () => onInput(merge, mergeVal, TUNE_MERGE_KEY));
+}
+initSpeakerTuning();
+
+/** Render the live `matcher_telemetry` push into the tuning readout. */
+function updateTuningReadout(msg: {
+  speakerCount?: number;
+  enrolledCount?: number;
+  last?: { name: string; enrolled: boolean; confidence: number; voicedMs: number };
+  recentCosines?: number[];
+}): void {
+  const countEl = document.getElementById('tune-speaker-count');
+  const enrolledEl = document.getElementById('tune-enrolled-count');
+  const lastEl = document.getElementById('tune-last');
+  const recentEl = document.getElementById('tune-recent');
+  if (countEl && typeof msg.speakerCount === 'number') countEl.textContent = String(msg.speakerCount);
+  if (enrolledEl) {
+    enrolledEl.textContent =
+      typeof msg.enrolledCount === 'number' && msg.enrolledCount > 0
+        ? ` · ${msg.enrolledCount} enrolled`
+        : ' · none enrolled';
+  }
+  if (lastEl && msg.last) {
+    const l = msg.last;
+    lastEl.textContent = `last match: ${l.enrolled ? '✓ ' : ''}${l.name} · cos=${l.confidence.toFixed(2)} · ${l.voicedMs}ms`;
+  }
+  if (recentEl && msg.recentCosines) {
+    recentEl.textContent = `recent: ${msg.recentCosines.map((c) => c.toFixed(2)).join(' ')}`;
+  }
+}
+
 // Companion-UI calibration controls (more reliable than the WebView console).
 function initCalibrationControls(): void {
   const btnCal = document.getElementById('btn-calibrate');
@@ -917,6 +1013,9 @@ app.init().then(() => {
   console.log('[LiveCaption] Ready');
   // Initial WS wrap (may already be connected at this point)
   setTimeout(rewrapWsOnMessage, 100);
+  // Push the wearer's saved matcher thresholds once the socket is up, so a
+  // session starts with their calibration rather than the server defaults.
+  setTimeout(sendMatcherConfig, 300);
   // ?cal in the URL → show the calibration ruler on launch.
   const params = new URLSearchParams(location.search);
   if (params.has('cal')) {

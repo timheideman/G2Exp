@@ -78,6 +78,32 @@ export interface EnrolledMatchResult {
   confidence: number;
 }
 
+/** One enrolled voice's score for a chunk (diagnostics only). */
+export interface EnrolledScore {
+  id: string;
+  name: string;
+  sim: number;
+}
+
+/**
+ * Diagnostics view of a single match: the chosen result PLUS the full enrolled
+ * scoreboard and the top-1↔top-2 margin. Emitted only when verbose logging is
+ * on; it is what lets us tune `acceptThreshold` from real data (is a wrong name
+ * a knife-edge margin → threshold problem, or did the wrong voice genuinely
+ * out-score the right one → embedding problem?) and spot near-misses that a
+ * single confidence number hides.
+ */
+export interface VerboseMatchResult extends EnrolledMatchResult {
+  /** Every enrolled voice's cosine to this chunk, highest first. */
+  enrolledScores: EnrolledScore[];
+  /**
+   * Gap between the best and second-best ENROLLED cosine (Infinity if 0–1
+   * enrolled). A small margin on an accepted match = a swap risk: the next noisy
+   * chunk could flip to the runner-up.
+   */
+  topMargin: number;
+}
+
 export function cosine(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;
   let dot = 0, na = 0, nb = 0;
@@ -162,6 +188,23 @@ export class EnrolledSpeakerMatcher {
     this.unknowns.push(u);
     this.nextUnknown++;
     return { speakerKey: u.key, name: `Speaker ${letter}`, enrolled: false, confidence: 1 };
+  }
+
+  /**
+   * Like `match()`, but also returns the full enrolled scoreboard and top-1↔2
+   * margin for diagnostics. The DECISION is delegated to `match()` so the two
+   * can never diverge — this only adds visibility, never changes behavior.
+   * (Note: `match()` mutates unknown clusters, so call this EXACTLY once per
+   * chunk, in place of `match()`, never alongside it.)
+   */
+  matchVerbose(embedding: number[]): VerboseMatchResult {
+    const enrolledScores: EnrolledScore[] = this.enrolled
+      .map((vp) => ({ id: vp.id, name: vp.name, sim: cosine(embedding, vp.embedding) }))
+      .sort((a, b) => b.sim - a.sim);
+    const topMargin =
+      enrolledScores.length >= 2 ? enrolledScores[0].sim - enrolledScores[1].sim : Infinity;
+    const result = this.match(embedding);
+    return { ...result, enrolledScores, topMargin };
   }
 
   private foldUnknown(u: UnknownSpeaker, embedding: number[]): void {

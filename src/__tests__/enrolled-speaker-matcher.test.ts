@@ -91,6 +91,46 @@ describe('EnrolledSpeakerMatcher — unknown clustering', () => {
   });
 });
 
+describe('EnrolledSpeakerMatcher — matchVerbose (diagnostics)', () => {
+  it('returns the same decision as match(), plus the full scoreboard', () => {
+    const m = new EnrolledSpeakerMatcher();
+    enroll(m);
+    const v = m.matchVerbose(TIM_NOISY);
+    // Decision identical to match().
+    expect(v.name).toBe('Tim');
+    expect(v.enrolled).toBe(true);
+    expect(v.speakerKey).toBe('tim');
+    // Scoreboard: every enrolled voice, highest first.
+    expect(v.enrolledScores.map((s) => s.name)).toEqual(['Tim', 'Jesse']);
+    expect(v.enrolledScores[0].sim).toBeGreaterThan(v.enrolledScores[1].sim);
+  });
+
+  it('computes the top-1↔top-2 margin', () => {
+    const m = new EnrolledSpeakerMatcher();
+    enroll(m); // Tim=[1,0,0,0], Jesse=[0,1,0,0]
+    const v = m.matchVerbose(TIM); // cos to Tim=1, to Jesse=0
+    expect(v.topMargin).toBeCloseTo(1, 6);
+  });
+
+  it('reports an infinite margin when fewer than two voices are enrolled', () => {
+    const m = new EnrolledSpeakerMatcher();
+    m.setEnrolled([{ id: 'tim', name: 'Tim', embedding: TIM }]);
+    expect(m.matchVerbose(TIM).topMargin).toBe(Infinity);
+  });
+
+  it('surfaces a knife-edge margin between two similar enrolled voices', () => {
+    const m = new EnrolledSpeakerMatcher();
+    // Two near-identical enrolled voices → a chunk close to both has a tiny margin.
+    m.setEnrolled([
+      { id: 'a', name: 'A', embedding: [1, 0, 0, 0] },
+      { id: 'b', name: 'B', embedding: [0.99, 0.14, 0, 0] },
+    ]);
+    const v = m.matchVerbose([0.995, 0.07, 0, 0]);
+    expect(v.enrolled).toBe(true);
+    expect(v.topMargin).toBeLessThan(0.08); // would trip the low-margin flag
+  });
+});
+
 describe('EnrolledSpeakerMatcher — lifecycle', () => {
   it('reset() forgets unknown clusters but keeps enrolled prints', () => {
     const m = new EnrolledSpeakerMatcher();

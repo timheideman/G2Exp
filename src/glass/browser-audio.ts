@@ -33,6 +33,20 @@ export class BrowserAudioCapture {
   async start(): Promise<void> {
     if (this._isCapturing) return;
 
+    // navigator.mediaDevices is gated to secure contexts. On iOS Safari,
+    // hitting the dev server by LAN IP over plain http:// makes it undefined
+    // and the raw error reads "undefined is not an object (evaluating
+    // 'navigator.mediaDevices.getUserMedia')" — surface the real reason.
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      const isSecure = typeof window !== 'undefined' && (window as any).isSecureContext;
+      const host = typeof location !== 'undefined' ? location.host : '';
+      throw new Error(
+        isSecure === false
+          ? `Mic blocked — page must be served over HTTPS or localhost (current: ${location.protocol}//${host}).`
+          : 'Mic API unavailable in this browser.',
+      );
+    }
+
     try {
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {

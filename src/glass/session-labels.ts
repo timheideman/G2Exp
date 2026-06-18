@@ -38,22 +38,35 @@ export class SessionLabels {
   }
 
   /**
-   * Apply a server-resolved speaker identification.
+   * Apply a server speaker attribution.
    *
-   * Called when the server sends a `speaker_identified` message after
-   * matching audio against the voiceprint store. Updates the session
-   * display name for the given speaker index so the glasses show the
-   * contact's name instead of a generic letter.
+   * The server emits this for EVERY match, but only an `enrolled` match (a real
+   * voiceprint hit) is a confirmed identity. An unenrolled match is just the
+   * blind-cluster label ("Speaker A/B/C") — the wearer, not the system, is the
+   * source of truth for who those are, so we must NOT promote it to an
+   * `identified` name (that's what wrongly lit the "✅ recognized" badge for
+   * never-recognized clusters). For an unenrolled attribution we leave the
+   * speaker as an unconfirmed letter; `getDisplayName` already falls back to
+   * "Speaker {letter}", and any wearer-typed session label still wins.
    *
    * @param speakerIndex  Deepgram speaker index (0-based)
-   * @param name          Resolved contact name from the voiceprint match
+   * @param name          Resolved contact name (only meaningful when enrolled)
    * @param voiceprintId  ID of the matched voiceprint, or null if unavailable
+   * @param enrolled      True iff this was a real enrolled-voiceprint match
    */
   applyServerIdentification(
     speakerIndex: number,
     name: string,
     voiceprintId: string | null,
+    enrolled: boolean,
   ): void {
+    if (!enrolled) {
+      // Blind cluster, not a confirmed identity. If a stale identified name
+      // lingers for this index (e.g. a prior session-recompute), drop it so the
+      // badge reverts to unconfirmed rather than falsely claiming "recognized".
+      this.clearIdentified(speakerIndex);
+      return;
+    }
     this.setIdentified(speakerIndex, name);
     // voiceprintId is available for callers that need to cross-reference
     // the contact store (e.g., to update lastMatchedAt in the UI).

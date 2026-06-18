@@ -383,6 +383,37 @@
         </div>
         <div id="fit-status" style="font-size:11px;color:#666;margin-top:6px;min-height:14px;"></div>
       </div>
+
+      <!-- Speaker matching calibration (live) -->
+      <div class="setting-group">
+        <label>Speaker tuning (live)</label>
+        <div style="font-size:11px;color:#555;margin-bottom:10px;line-height:1.5;">
+          Tune how readily voices match. <strong style="color:#888">Merge</strong> higher = fewer
+          duplicate speakers (one person split into A/B/C). <strong style="color:#888">Accept</strong>
+          = how close a voice must be to a saved contact to be named. Talk and watch the readout.
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <span style="font-size:12px;color:#666;width:54px;">Accept</span>
+          <input id="tune-accept" type="range" min="0" max="0.95" step="0.01" value="0.45" style="flex:1;" />
+          <span id="tune-accept-val" style="font-size:12px;color:#ccc;width:34px;text-align:right;">0.45</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+          <span style="font-size:12px;color:#666;width:54px;">Merge</span>
+          <input id="tune-merge" type="range" min="0" max="0.95" step="0.01" value="0.40" style="flex:1;" />
+          <span id="tune-merge-val" style="font-size:12px;color:#ccc;width:34px;text-align:right;">0.40</span>
+        </div>
+
+        <div style="background:#141414;border:1px solid #222;border-radius:6px;padding:8px 10px;font-size:12px;line-height:1.6;">
+          <div style="color:#888;">
+            Speakers detected:
+            <strong id="tune-speaker-count" style="color:#4BB956;font-size:14px;">—</strong>
+            <span id="tune-enrolled-count" style="color:#555;"></span>
+          </div>
+          <div id="tune-last" style="color:#777;">last match: —</div>
+          <div id="tune-recent" style="color:#555;font-family:monospace;">recent: —</div>
+        </div>
+      </div>
     </div>
   </div>
 

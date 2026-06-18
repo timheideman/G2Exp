@@ -128,39 +128,63 @@ describe('SessionLabels', () => {
   });
 
   describe('applyServerIdentification', () => {
-    it('updates the display name for a speaker index', () => {
-      labels.applyServerIdentification(0, 'Sarah van Berg', 'vp-sarah-01');
+    it('updates the display name for an ENROLLED match', () => {
+      labels.applyServerIdentification(0, 'Sarah van Berg', 'vp-sarah-01', true);
       expect(labels.getDisplayName(0)).toBe('Sarah van Berg');
     });
 
     it('identified name takes priority over session label', () => {
       labels.setLabel(0, 'Doctor');
-      labels.applyServerIdentification(0, 'Dr. Janssen', 'vp-janssen');
+      labels.applyServerIdentification(0, 'Dr. Janssen', 'vp-janssen', true);
       expect(labels.getDisplayName(0)).toBe('Dr. Janssen');
     });
 
-    it('works when voiceprintId is null', () => {
-      labels.applyServerIdentification(1, 'Marco', null);
-      expect(labels.getDisplayName(1)).toBe('Marco');
-      expect(labels.getShortTag(1)).toBe('Marco');
-    });
-
-    it('appears as identified type in getAllLabels', () => {
-      labels.applyServerIdentification(2, 'Tim', 'vp-tim');
+    it('appears as identified type in getAllLabels (enrolled)', () => {
+      labels.applyServerIdentification(2, 'Tim', 'vp-tim', true);
       const all = labels.getAllLabels();
       expect(all).toHaveLength(1);
       expect(all[0]).toEqual({ speakerIndex: 2, name: 'Tim', type: 'identified' });
     });
 
     it('updates an existing identification', () => {
-      labels.applyServerIdentification(0, 'Sarah', 'vp-1');
-      labels.applyServerIdentification(0, 'Sarah van Berg', 'vp-1');
+      labels.applyServerIdentification(0, 'Sarah', 'vp-1', true);
+      labels.applyServerIdentification(0, 'Sarah van Berg', 'vp-1', true);
       expect(labels.getDisplayName(0)).toBe('Sarah van Berg');
     });
 
     it('bridges server pipeline to display: short tag uses first name', () => {
-      labels.applyServerIdentification(0, 'Bartholomew Smith', 'vp-x');
+      labels.applyServerIdentification(0, 'Bartholomew Smith', 'vp-x', true);
       expect(labels.getShortTag(0)).toBe('Barthol.');
+    });
+
+    // ── The bug fix: an UNENROLLED match (blind cluster) must NOT become a
+    // confirmed identity, or the UI falsely shows "✅ recognized" for a speaker
+    // the system never actually recognized (Tim's 0-contact monologue → 4×
+    // "recognized"). The wearer is the source of truth for who A/B/C are.
+    it('an unenrolled cluster does NOT become an identified name', () => {
+      labels.applyServerIdentification(1, 'Speaker B', null, false);
+      // Falls back to the generic letter, not the server-sent cluster name.
+      expect(labels.getDisplayName(1)).toBe('Speaker B'); // == "Speaker {letter}"
+      // …and crucially it is NOT typed 'identified' (no green badge).
+      expect(labels.getAllLabels()).toHaveLength(0);
+    });
+
+    it('an unenrolled match leaves a wearer session label intact', () => {
+      labels.setLabel(1, 'Neighbor');
+      labels.applyServerIdentification(1, 'Speaker B', null, false);
+      expect(labels.getDisplayName(1)).toBe('Neighbor');
+      expect(labels.getAllLabels()[0]).toEqual({
+        speakerIndex: 1,
+        name: 'Neighbor',
+        type: 'labeled',
+      });
+    });
+
+    it('an unenrolled match clears a STALE prior identification (badge reverts)', () => {
+      labels.applyServerIdentification(0, 'Sarah', 'vp-1', true); // confirmed
+      expect(labels.getAllLabels()[0].type).toBe('identified');
+      labels.applyServerIdentification(0, 'Speaker A', null, false); // now unconfirmed
+      expect(labels.getAllLabels()).toHaveLength(0); // identity withdrawn
     });
   });
 });
