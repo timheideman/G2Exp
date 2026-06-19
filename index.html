@@ -298,6 +298,15 @@
       animation: nameAlertFadeOut 3s ease-out forwards;
     }
   </style>
+  <script>
+    // In the packaged .ehpk Private Build, the WebView loads from a local
+    // file:// origin so window.location.hostname is empty and the resolver in
+    // src/glass/app.ts would fall back to "wss://undefined/ws". Pin the WS URL
+    // to the production backend so the packaged build always reaches the right
+    // server. In dev / mobile-Safari direct load this is a harmless override
+    // that matches what the resolver would compute anyway.
+    window.__LIVECAPTION_WS_URL__ = 'wss://livecaption.astralate.com/ws';
+  </script>
 </head>
 <body>
   <div class="header">
