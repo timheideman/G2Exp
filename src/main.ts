@@ -332,10 +332,30 @@ function initContacts(): void {
     contactsToggle.classList.toggle('open', isOpen);
   });
 
-  // Add Contact button → open fresh enrollment modal
-  document.getElementById('btn-add-contact')?.addEventListener('click', () => {
-    openEnrollModal(null, null);
-  });
+  // Add Contact button → open fresh enrollment modal.
+  //
+  // In glasses mode (Even Realities WebView) the phone-mic getUserMedia path
+  // is blocked by the WebView sandbox regardless of the phone-microphone
+  // permission in app.json, so mic-based enrollment can't run. We hide the
+  // button and steer users to the per-speaker "Name this speaker" flow, which
+  // uses enroll_from_buffer over the glasses mic stream the server already
+  // has — no phone-mic API needed.
+  const btnAddContact = document.getElementById('btn-add-contact');
+  const win = window as any;
+  const isGlassesMode = !!(win.EvenAppBridge || win._evenAppBridge || win.flutter_inappwebview);
+  if (isGlassesMode) {
+    if (btnAddContact) btnAddContact.style.display = 'none';
+    const hint = document.getElementById('contacts-hint');
+    if (hint) {
+      hint.textContent =
+        'Tap a speaker above to name them — voiceprints are built from the glasses mic.';
+      hint.style.display = '';
+    }
+  } else {
+    btnAddContact?.addEventListener('click', () => {
+      openEnrollModal(null, null);
+    });
+  }
 
   document.getElementById('btn-export')?.addEventListener('click', () => {
     const data = contactStore.export();
