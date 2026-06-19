@@ -269,13 +269,13 @@ function logDiarization(isFinal: boolean, words: any[]): void {
 
 // ─── WebSocket Server ────────────────────────────────────────────────────────
 
-// Bind all interfaces explicitly so the glasses app (loaded on the phone over
-// LAN via QR sideload) can reach this server at the laptop's LAN IP, not just
-// localhost. ws@8 defaults to all-interfaces, but being explicit removes any
-// ambiguity — this is the difference between "captions connect" and a silent
-// ECONNREFUSED you'd waste device time chasing.
-const wss = new WebSocketServer({ host: '0.0.0.0', port: PORT });
-console.log(`🎙️  LiveCaption server listening on ws://0.0.0.0:${PORT}`);
+// Dev defaults to 0.0.0.0 so the glasses app (loaded on the phone over LAN via
+// QR sideload) can reach this server at the laptop's LAN IP. In production
+// behind Caddy / nginx, set HOST=127.0.0.1 so only the local reverse proxy can
+// reach the WS server — defense in depth on top of the firewall.
+const HOST = process.env.HOST || '0.0.0.0';
+const wss = new WebSocketServer({ host: HOST, port: PORT });
+console.log(`🎙️  LiveCaption server listening on ws://${HOST}:${PORT}`);
 
 wss.on('connection', (clientWs: WebSocket) => {
   console.log('📱 Client connected');
